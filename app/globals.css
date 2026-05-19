@@ -1,0 +1,63 @@
+:root {
+  --bg: #0b0d10;
+  --bg2: #16191e;
+  --ink: #f0efe9;
+  --sub: rgba(240, 239, 233, 0.55);
+  --dim: rgba(240, 239, 233, 0.12);
+  --dim2: rgba(240, 239, 233, 0.22);
+  --card: rgba(255, 255, 255, 0.025);
+  --accent: #c8f56b;
+  --accent-dim: rgba(200, 245, 107, 0.18);
+  --danger: #ff7a6b;
+  --font: var(--font-sans), system-ui, sans-serif;
+  --mono: var(--font-mono), ui-monospace, monospace;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+body {
+  background: radial-gradient(ellipse at top, var(--bg2) 0%, var(--bg) 60%);
+  color: var(--ink);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button {
+  font-family: inherit;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+@keyframes dial-pulse {
+  0%,
+  100% {
+    opacity: var(--dial-pulse-lo, 0.25);
+    transform: translate(-50%, -50%) scale(0.86);
+  }
+  50% {
+    opacity: var(--dial-pulse-hi, 0.85);
+    transform: translate(-50%, -50%) scale(1.1);
+  }
+}
+
+@keyframes dial-shimmer {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}

@@ -1,0 +1,161 @@
+{
+  "capturedAt": "2026-05-19",
+  "rates": {
+    "aaveV3": {
+      "apy": 0.7307567213861029,
+      "apyMean30d": 0.8418879906631864,
+      "sampleSize": 176,
+      "totalTvlUsd": 14116329991
+    },
+    "morphoBlue": {
+      "apy": 1.8416646623844695,
+      "apyMean30d": 2.483931491175262,
+      "sampleSize": 595,
+      "totalTvlUsd": 11390780988
+    },
+    "sparkLend": {
+      "apy": 1.7356281292890143,
+      "apyMean30d": 1.8401906040306306,
+      "sampleSize": 24,
+      "totalTvlUsd": 6604146325
+    },
+    "compoundV3": {
+      "apy": 0.29991504040655204,
+      "apyMean30d": 0.3755178833030608,
+      "sampleSize": 79,
+      "totalTvlUsd": 1194596729
+    },
+    "lido": {
+      "apy": 2.393,
+      "apyMean30d": 2.55077,
+      "sampleSize": 1,
+      "totalTvlUsd": 18762255500
+    },
+    "rocketPool": {
+      "apy": 1.9995399999999999,
+      "apyMean30d": 2.11545,
+      "sampleSize": 1,
+      "totalTvlUsd": 2861544709
+    },
+    "etherFi": {
+      "apy": 2.577891878020851,
+      "apyMean30d": 2.638584925884353,
+      "sampleSize": 9,
+      "totalTvlUsd": 4333831765
+    },
+    "uniswap": {
+      "apy": 1.692812679502494,
+      "apyMean30d": 1.4471296162918827,
+      "sampleSize": 996,
+      "totalTvlUsd": 5692646201
+    },
+    "curve": {
+      "apy": 2.1510216081484166,
+      "apyMean30d": 3.5035273647078204,
+      "sampleSize": 311,
+      "totalTvlUsd": 1777662738
+    },
+    "balancer": {
+      "apy": 2.070839022703233,
+      "apyMean30d": 20.015929812218907,
+      "sampleSize": 82,
+      "totalTvlUsd": 124011103
+    },
+    "pendle": {
+      "apy": 7.097342049124418,
+      "apyMean30d": 7.740764459632867,
+      "sampleSize": 191,
+      "totalTvlUsd": 753803271
+    },
+    "jito": {
+      "apy": 5.279999999999999,
+      "apyMean30d": 5.66426,
+      "sampleSize": 1,
+      "totalTvlUsd": 833094308
+    },
+    "eigenLayer": {
+      "apy": null,
+      "apyMean30d": null,
+      "sampleSize": 0,
+      "totalTvlUsd": 0
+    },
+    "renzo": {
+      "apy": 1.7366,
+      "apyMean30d": 2.03338,
+      "sampleSize": 1,
+      "totalTvlUsd": 176504660
+    },
+    "kelp": {
+      "apy": 2.57,
+      "apyMean30d": 1.4557,
+      "sampleSize": 1,
+      "totalTvlUsd": 1383557162
+    },
+    "kamino": {
+      "apy": 0.333962744436084,
+      "apyMean30d": 0.4583252289914074,
+      "sampleSize": 77,
+      "totalTvlUsd": 850938021
+    },
+    "jupiter": {
+      "apy": 4.352872307020914,
+      "apyMean30d": 4.362153295761602,
+      "sampleSize": 64,
+      "totalTvlUsd": 1420043443
+    },
+    "raydium": {
+      "apy": 3.323358662414785,
+      "apyMean30d": 7.381577333084431,
+      "sampleSize": 316,
+      "totalTvlUsd": 424765692
+    },
+    "aerodrome": {
+      "apy": 7.434928664416355,
+      "apyMean30d": 9.688689421490123,
+      "sampleSize": 92,
+      "totalTvlUsd": 188985296
+    },
+    "hyperliquid": {
+      "apy": null,
+      "apyMean30d": null,
+      "sampleSize": 0,
+      "totalTvlUsd": 0
+    },
+    "jupiterPerps": {
+      "apy": null,
+      "apyMean30d": null,
+      "sampleSize": 0,
+      "totalTvlUsd": 0
+    },
+    "gmx": {
+      "apy": 7.7970032857305345,
+      "apyMean30d": 7.845306007074914,
+      "sampleSize": 63,
+      "totalTvlUsd": 165217307
+    },
+    "dydx": {
+      "apy": null,
+      "apyMean30d": null,
+      "sampleSize": 0,
+      "totalTvlUsd": 0
+    },
+    "lighter": {
+      "apy": null,
+      "apyMean30d": null,
+      "sampleSize": 0,
+      "totalTvlUsd": 0
+    },
+    "pumpFun": {
+      "apy": null,
+      "apyMean30d": null,
+      "sampleSize": 0,
+      "totalTvlUsd": 0
+    },
+    "meteora": {
+      "apy": null,
+      "apyMean30d": null,
+      "sampleSize": 0,
+      "totalTvlUsd": 0
+    }
+  }
+}
