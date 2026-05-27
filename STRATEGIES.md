@@ -1,167 +1,53 @@
-# Tilt — Risk Profiles & Strategies
+# Tilt — Risk Profiles & Wayfinder Strategy Compositions
 
-Source of truth: [`lib/tilt.ts`](./lib/tilt.ts). The dial maps a risk score (0–100) to one of five discrete profiles. Each profile defines an asset-class allocation and a routing map of execution venues per asset class.
+Source of truth: [`lib/profile-strategies.ts`](./lib/profile-strategies.ts) (TS mirror) and [`api/wayfinder/execute.py`](./api/wayfinder/execute.py) (Python dispatch).
 
-## Asset classes
+Strategies are **not implemented in this repo.** They live in [WayfinderFoundation/wayfinder-paths-sdk](https://github.com/WayfinderFoundation/wayfinder-paths-sdk). Each profile invokes one (eventually a composition of) Wayfinder strategy classes. Wayfinder handles pool selection, slippage, rebalancing, and multi-tx routing internally — we just pick which strategy.
 
-| Key | Name | Category |
+The dial maps a 0–100 risk score to one of five discrete profiles.
+
+## Profiles
+
+| Risk band | Profile | Wayfinder strategies | Chain(s) | Status |
+| --- | --- | --- | --- | ---: |
+| 0–20 | Stable Lender | `stablecoin_yield_strategy` | Base | **LIVE** |
+| 21–40 | Conservative Yield | `stablecoin_yield_strategy` + `multi_vault_split_strategy` | Base + HyperEVM | STUB |
+| 41–60 | Balanced DeFi | `stablecoin_yield` + `moonwell_wsteth_loop` + `multi_vault_split` | Base + HyperEVM | STUB |
+| 61–80 | Aggressive Growth | `moonwell_wsteth_loop` + `basis_trading` + `projectx_thbill_usdc` | Base + Hyperliquid + HyperEVM | STUB |
+| 81–100 | Max Speculation | `moonwell_wsteth_loop` + `basis_trading` + `boros_hype` | Multi-chain | STUB |
+
+## What Wayfinder strategies do
+
+| Strategy | Chain | What it actually does |
 | --- | --- | --- |
-| `LEND` | Stable Lending | Stablecoin yield |
-| `SPOT` | BTC / ETH / SOL | Blue-chip spot |
-| `LST` | Liquid Staking | Staked majors |
-| `DEFI` | DeFi Tokens | Protocol exposure |
-| `YIELD` | Yield Trading | Structured yield |
-| `RESTAKE` | Restaking | Compounded yield |
-| `MEME` | Memecoins | High beta |
-| `PERP` | Perps | Leveraged |
+| `stablecoin_yield_strategy` | Base | Scans Base DeFi pools (Aave, Morpho, etc.), supplies USDC to the highest-APY low-risk venue, rebalances when better opportunities emerge. |
+| `multi_vault_split_strategy` | Multi-chain (HyperEVM core) | Diversifies USDC across HLP, Boros, and Avantis vaults. |
+| `moonwell_wsteth_loop_strategy` | Base | Levered wstETH carry — supplies wstETH on Moonwell, borrows USDC, swaps to wstETH, repeats. ETH-correlated yield. |
+| `basis_trading_strategy` | Hyperliquid | Delta-neutral funding-rate capture — long spot, short perp on Hyperliquid. |
+| `projectx_thbill_usdc_strategy` | HyperEVM | THBILL/USDC concentrated LP with auto-compounding. |
+| `boros_hype_strategy` | Multi-chain | HYPE yield via Boros with Hyperliquid hedging. |
+| `hyperlend_stable_yield_strategy` | HyperEVM | Stablecoin lending allocator on HyperLend (currently unused — overlaps with `multi_vault_split`). |
 
-## Profiles at a glance
+## What "STUB" means for the 4 non-Stable profiles
 
-| Risk band | Profile | Tag | LEND | SPOT | LST | DEFI | YIELD | RESTAKE | MEME | PERP |
-| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0–20 | Stable Lender | Low | 100% | — | — | — | — | — | — | — |
-| 21–40 | Conservative Yield | Cautious | 65% | 25% | 10% | — | — | — | — | — |
-| 41–60 | Balanced DeFi | Moderate | 35% | 25% | 15% | 10% | 10% | 5% | — | — |
-| 61–80 | Aggressive Growth | High | 15% | 20% | 10% | 20% | 10% | 20% | 5% | — |
-| 81–100 | Max Speculation | Extreme | 5% | 10% | — | 10% | — | 10% | 35% | 30% |
+Wayfinder's strategies are **chain-pinned**. Most of them live on HyperEVM or Hyperliquid, but our funding currency lands on Base. To activate Conservative Yield → Max Speculation we need two pieces of plumbing **not yet built**:
 
-12-month projections (interpolated linearly with risk) — at the band midpoints:
+1. **Cross-chain bridging** — USDC has to move from Base to HyperEVM/Hyperliquid before those strategies can deposit. Candidate routes: Circle's native CCTP, Across, deBridge. Each adds ~1–15 minutes of finality.
+2. **Composition runner** — When a profile invokes multiple strategies (e.g., 70% `stablecoin_yield` + 30% `multi_vault_split`), the sidecar needs to split the amount, dispatch each strategy in parallel or sequence, and reconcile results into one combined status.
 
-| Profile | Expected | P10 (downside) | P90 (upside) | Annualized vol |
-| --- | ---: | ---: | ---: | ---: |
-| Stable Lender (r=10) | +9% | −8% | +16% | 14% |
-| Conservative Yield (r=30) | +14% | −17% | +24% | 24% |
-| Balanced DeFi (r=50) | +19% | −26% | +35% | 35% |
-| Aggressive Growth (r=70) | +24% | −35% | +47% | 46% |
-| Max Speculation (r=90) | +29% | −44% | +58% | 56% |
+`lib/profile-strategies.ts` already declares the intended compositions with `status: "stub"` and a per-entry `pendingNote` explaining what's missing. The Plan UI surfaces these honestly with `STUB` badges.
 
----
+## Verifying coverage
 
-## 1. Stable Lender — risk 0–20
+The Python sidecar exposes `GET /api/wayfinder/execute` which returns:
 
-> Capital stays in stablecoin lending only, routed across the top lending venues for depth and resilience.
+```json
+{
+  "ok": true,
+  "service": "wayfinder-executor",
+  "profiles": ["stable_lender", "conservative_yield", ...],
+  "wayfinderInstalled": true
+}
+```
 
-**Allocation:** 100% `LEND`
-
-**Routing:**
-
-| Asset | Venues |
-| --- | --- |
-| LEND | Aave V3, Morpho Blue, SparkLend |
-
-**Blocked:** Volatile spot · LP positions · Restaking · Memecoins · Perps
-
----
-
-## 2. Conservative Yield — risk 21–40
-
-> Stablecoin yield remains the anchor, with measured exposure to blue-chip spot and ETH liquid staking.
-
-**Allocation:** 65% `LEND` · 25% `SPOT` · 10% `LST`
-
-**Routing:**
-
-| Asset | Venues |
-| --- | --- |
-| LEND | Aave V3, Morpho Blue, SparkLend, Compound V3 |
-| SPOT | Uniswap |
-| LST | Lido, Rocket Pool |
-
-**Blocked:** Restaking · Memecoins · Perps
-
----
-
-## 3. Balanced DeFi — risk 41–60
-
-> A balanced DeFi mix across stable lending, blue-chip spot, liquid staking, and mature protocol exposure.
-
-**Allocation:** 35% `LEND` · 25% `SPOT` · 15% `LST` · 10% `DEFI` · 10% `YIELD` · 5% `RESTAKE`
-
-**Routing:**
-
-| Asset | Venues |
-| --- | --- |
-| LEND | Aave V3, Morpho Blue, SparkLend, Compound V3 |
-| SPOT | Uniswap, Jupiter |
-| LST | Lido, Rocket Pool, Jito |
-| DEFI | Uniswap, Curve, Balancer |
-| YIELD | Pendle |
-| RESTAKE | ether.fi |
-
-**Blocked:** Memecoins · Perps
-
----
-
-## 4. Aggressive Growth — risk 61–80
-
-> Higher-beta DeFi, Solana ecosystem exposure, and restaking enter the strategy while leverage remains out of scope.
-
-**Allocation:** 15% `LEND` · 20% `SPOT` · 10% `LST` · 20% `DEFI` · 10% `YIELD` · 20% `RESTAKE` · 5% `MEME`
-
-**Routing:**
-
-| Asset | Venues |
-| --- | --- |
-| LEND | Aave V3, Morpho Blue |
-| SPOT | Uniswap, Jupiter |
-| LST | Lido, Rocket Pool, Jito |
-| DEFI | Uniswap, Aerodrome, Kamino, Jupiter |
-| YIELD | Pendle |
-| RESTAKE | ether.fi, EigenLayer, Renzo, Kelp DAO |
-| MEME | Raydium, Aerodrome |
-
-**Blocked:** Leveraged perps · Pre-migration memecoin launches
-
----
-
-## 5. Max Speculation — risk 81–100
-
-> Capital targets liquid memecoins, high-beta spot, and perpetual futures with a small cash buffer for execution.
-
-**Allocation:** 5% `LEND` · 10% `SPOT` · 10% `DEFI` · 10% `RESTAKE` · 35% `MEME` · 30% `PERP`
-
-**Routing:**
-
-| Asset | Venues |
-| --- | --- |
-| LEND | Aave V3 |
-| SPOT | Uniswap, Jupiter |
-| DEFI | Uniswap, Jupiter, Aerodrome |
-| RESTAKE | ether.fi, EigenLayer |
-| MEME | Uniswap, Raydium, Jupiter, Aerodrome, Pump.fun, Meteora |
-| PERP | Hyperliquid, Jupiter Perps, GMX v2, dYdX v4, Lighter |
-
-**Blocked:** _none_
-
----
-
-## Platform reference
-
-| Platform | Category | Networks | Instruments | Role |
-| --- | --- | --- | --- | --- |
-| Aave V3 | Stablecoin lending | Ethereum, Base, Arbitrum | USDC, USDT, DAI | Primary stablecoin lending market. |
-| Morpho Blue | Stablecoin lending | Ethereum, Base | Curated USDC / USDT vaults | Isolated stablecoin lending through curated vaults. |
-| SparkLend | Stablecoin lending | Ethereum | USDC, DAI, USDS | Sky-aligned stablecoin lending and reserve yield. |
-| Compound V3 | Stablecoin lending | Ethereum, Base, Arbitrum | USDC, USDT | Secondary stablecoin lending venue. |
-| Lido | Liquid staking | Ethereum | stETH, wstETH | Core ETH liquid staking exposure. |
-| Rocket Pool | Liquid staking | Ethereum | rETH | Decentralized ETH liquid staking exposure. |
-| Jito | Solana DeFi | Solana | JitoSOL | Solana liquid staking exposure. |
-| ether.fi | Restaking | Ethereum | eETH, weETH | Liquid restaking and higher-yield ETH exposure. |
-| EigenLayer | Restaking | Ethereum | Restaked ETH, AVS exposure | Native restaking exposure. |
-| Renzo | Restaking | Ethereum, Arbitrum | ezETH | Liquid restaking diversification. |
-| Kelp DAO | Restaking | Ethereum | rsETH | Liquid restaking diversification. |
-| Uniswap | DeFi liquidity | Ethereum, Base, Arbitrum | ETH, WBTC, DeFi majors, Memecoins | Primary EVM spot and liquidity venue. |
-| Curve | DeFi liquidity | Ethereum, Arbitrum, Base | Stablecoins, LST pairs | Stablecoin and LST liquidity routing. |
-| Balancer | DeFi liquidity | Ethereum, Arbitrum, Base | Weighted DeFi pools, LST pools | Diversified liquidity and index-style DeFi exposure. |
-| Pendle | Yield trading | Ethereum, Arbitrum | Fixed yield, LST yield, LRT yield | Structured yield and rate exposure. |
-| Kamino | Solana DeFi | Solana | SOL, JitoSOL, USDC | Solana lending and automated vault exposure. |
-| Jupiter | Solana DeFi | Solana | SOL, JUP, Solana majors, Memecoins | Primary Solana spot routing and aggregation. |
-| Aerodrome | Memecoin execution | Base | Base majors, Base memecoins | Base ecosystem liquidity and memecoin execution. |
-| Raydium | Memecoin execution | Solana | BONK, WIF, Solana memecoins | Liquid Solana memecoin execution venue. |
-| Pump.fun | Memecoin execution | Solana | New Solana memecoins | Highest-risk launch venue; only for max speculation. |
-| Meteora | Memecoin execution | Solana | Solana memecoin pools | Solana dynamic liquidity pools for high-beta tokens. |
-| Hyperliquid | Perpetuals | Hyperliquid L1 | BTC-PERP, ETH-PERP, SOL-PERP, Majors | Primary on-chain perpetual futures venue. |
-| Jupiter Perps | Perpetuals | Solana | SOL-PERP, ETH-PERP, BTC-PERP | Solana-native perpetual futures venue. |
-| GMX v2 | Perpetuals | Arbitrum, Avalanche | BTC-PERP, ETH-PERP, SOL-PERP | Mature peer-to-pool perpetual futures venue. |
-| dYdX v4 | Perpetuals | dYdX Chain | BTC-PERP, ETH-PERP, SOL-PERP, Majors | Orderbook perpetual futures diversification. |
-| Lighter | Perpetuals | Ethereum L2 | BTC-PERP, ETH-PERP, Majors | High-liquidity perp venue with zk-based execution. |
+If `wayfinderInstalled` is false, the Wayfinder package isn't in the deployed Python lambda — check `api/wayfinder/requirements.txt` and Vercel's Python build logs.

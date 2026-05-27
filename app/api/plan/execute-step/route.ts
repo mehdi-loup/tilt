@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { authenticate, privy } from "@/lib/privy-server";
+import { authenticate } from "@/lib/privy-server";
 import { getOrProvisionServerWallet, lookupServerWallet } from "@/lib/wallet-registry";
 import { buildPlan } from "@/lib/strategy-plan";
-import { buildErc20Approve, buildAaveSupplyUsdc, type TxRequest } from "@/lib/tx-builders";
-import { AAVE_V3_BASE, FUNDING_CAIP2, TOKENS } from "@/lib/chains";
-import type { Hex } from "viem";
 
 export const dynamic = "force-dynamic";
+// Strategy execution can take a long time (multi-tx Wayfinder deposit
+// loops). Bump the lambda budget; Vercel's default 300s is the ceiling.
+export const maxDuration = 300;
 
 interface ExecuteStepRequest {
   stepId: string;
@@ -18,17 +18,9 @@ interface ExecuteStepRequest {
 /**
  * POST /api/plan/execute-step
  *
- * Server-side executor for a single plan step. The funding step is handled
- * by the client (the user signs from their embedded wallet); every other
- * step goes through the user's app-owned Privy server wallet via
- * walletApi.ethereum.sendTransaction.
- *
- * Body: ExecuteStepRequest
- * Auth: Authorization: Bearer <privy-access-token>
- *
- * Returns either:
- *   { ok: true, txHash, source: 'live' | 'stub' }
- *   { ok: false, error }
+ * Server-side executor for a single plan step. The funding step is signed
+ * by the client (embedded wallet); strategy steps dispatch to the
+ * Wayfinder Python sidecar at /api/wayfinder/execute.
  */
 export async function POST(req: Request) {
   const user = await authenticate(req);
@@ -37,12 +29,17 @@ export async function POST(req: Request) {
   }
 
   const body = (await req.json().catch(() => null)) as ExecuteStepRequest | null;
-  if (!body?.stepId || typeof body.risk !== "number" || typeof body.amountUsd !== "number" || !body.embeddedWalletAddress) {
+  if (
+    !body?.stepId ||
+    typeof body.risk !== "number" ||
+    typeof body.amountUsd !== "number" ||
+    !body.embeddedWalletAddress
+  ) {
     return NextResponse.json({ error: "bad request body" }, { status: 400 });
   }
 
-  // The fund step must be signed by the user's embedded wallet — server
-  // refuses, the client handles it.
+  // The funding step is signed by the embedded wallet; the server doesn't
+  // run it.
   if (body.stepId === "fund") {
     return NextResponse.json(
       { error: "the fund step is signed by the embedded wallet, not the server" },
@@ -53,9 +50,7 @@ export async function POST(req: Request) {
   const wallet =
     lookupServerWallet(user.userId) ?? (await getOrProvisionServerWallet(user.userId));
 
-  // Re-derive the plan deterministically so we can find the step and pick
-  // the right calldata builder. (Plans are pure functions of risk + amount
-  // + addresses — no state to look up.)
+  // Re-derive the plan deterministically and locate the step.
   const plan = buildPlan({
     risk: body.risk,
     amountUsd: body.amountUsd,
@@ -66,45 +61,71 @@ export async function POST(req: Request) {
   if (!step) {
     return NextResponse.json({ error: `unknown step: ${body.stepId}` }, { status: 404 });
   }
-
-  if (step.status === "stub") {
-    return NextResponse.json({
-      ok: true,
-      source: "stub",
-      txHash: null,
-      note: `${step.label} — venue-specific calldata builder not yet wired. See EXECUTION.md.`,
-    });
-  }
-
-  // Pick the right builder.
-  let tx: TxRequest;
-  const amount = BigInt(step.amountUnits ?? "0");
-  const serverAddress = wallet.address as Hex;
-
-  if (step.id === "approve-aave-usdc") {
-    tx = buildErc20Approve(TOKENS.USDC, AAVE_V3_BASE.pool, amount);
-  } else if (step.id === "supply-aave-usdc") {
-    tx = buildAaveSupplyUsdc(amount, serverAddress);
-  } else {
+  if (step.kind !== "strategy") {
     return NextResponse.json(
-      { error: `step '${step.id}' is marked live but has no calldata builder` },
-      { status: 500 },
+      { error: `step '${step.id}' has no server-side dispatcher` },
+      { status: 400 },
     );
   }
 
+  // Dispatch to the Wayfinder Python sidecar at /api/wayfinder/execute.
+  // Same project, same domain — Vercel routes /api/*.py to the Python
+  // function and /api/<everything-else>/route.ts to Next.js.
+  const origin = new URL(req.url).origin;
+  let res: Response;
   try {
-    const { hash } = await privy.walletApi.ethereum.sendTransaction({
-      walletId: wallet.walletId,
-      caip2: FUNDING_CAIP2,
-      transaction: {
-        to: tx.to,
-        data: tx.data,
-        value: tx.value === 0n ? undefined : `0x${tx.value.toString(16)}`,
+    res = await fetch(`${origin}/api/wayfinder/execute`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        // Forward the user's Privy JWT so the sidecar can also enforce auth.
+        authorization: `Bearer ${user.jwt}`,
       },
+      body: JSON.stringify({
+        profileId: plan.profileId,
+        amountUsd: step.amountUsd,
+        walletId: wallet.walletId,
+        walletAddress: wallet.address,
+        caip2: "eip155:8453",
+      }),
     });
-    return NextResponse.json({ ok: true, source: "live", txHash: hash, stepId: step.id });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "send failed";
-    return NextResponse.json({ ok: false, error: message }, { status: 502 });
+    return NextResponse.json(
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "wayfinder sidecar unreachable",
+      },
+      { status: 502 },
+    );
   }
+
+  const payload = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    source?: "live" | "stub" | "missing-dep" | "wayfinder-error";
+    note?: string;
+    txHashes?: string[];
+    error?: string;
+    status?: unknown;
+  };
+
+  if (!res.ok || !payload.ok) {
+    return NextResponse.json(
+      {
+        ok: false,
+        source: payload.source ?? "error",
+        error: payload.error ?? `sidecar HTTP ${res.status}`,
+      },
+      { status: 502 },
+    );
+  }
+
+  // Stubs return source:"stub" with a note. Live runs return source:"live".
+  return NextResponse.json({
+    ok: true,
+    source: payload.source ?? "live",
+    stepId: step.id,
+    note: payload.note,
+    txHashes: payload.txHashes ?? [],
+    status: payload.status,
+  });
 }

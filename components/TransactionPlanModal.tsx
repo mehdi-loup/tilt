@@ -21,7 +21,8 @@ type StepRuntimeStatus = "idle" | "running" | "success" | "stub" | "error";
 
 interface StepState {
   status: StepRuntimeStatus;
-  txHash?: string;
+  /** One hash for fund step (embedded signer). Multiple for strategy steps. */
+  txHashes?: string[];
   error?: string;
   note?: string;
 }
@@ -89,7 +90,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
         value: step.tx.value,
         chainId: step.tx.chainId,
       });
-      return { status: "success", txHash: hash };
+      return { status: "success", txHashes: [hash] };
     },
     [sendTransaction],
   );
@@ -110,14 +111,14 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
       });
       const body = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
-        source?: "live" | "stub";
-        txHash?: string | null;
+        source?: "live" | "stub" | "missing-dep" | "wayfinder-error";
+        txHashes?: string[];
         note?: string;
         error?: string;
       };
       if (!res.ok || !body.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      if (body.source === "stub") return { status: "stub", note: body.note };
-      return { status: "success", txHash: body.txHash ?? undefined };
+      if (body.source !== "live") return { status: "stub", note: body.note };
+      return { status: "success", txHashes: body.txHashes ?? [] };
     },
     [amount, embedded, getAccessToken, risk],
   );
@@ -235,7 +236,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
                     textAlign: "center",
                   }}
                 >
-                  PLAN COMPLETE · {plan.livePctCovered}% LIVE · {100 - plan.livePctCovered}% STUBBED
+                  PLAN COMPLETE · {Math.round(plan.liveFraction * 100)}% LIVE · {Math.round((1 - plan.liveFraction) * 100)}% STUBBED
                 </div>
               )}
               <div
@@ -463,8 +464,8 @@ function PlanSummary({ plan }: { plan: Plan }) {
         }}
       >
         EXEC WALLET · {shortAddr(plan.serverWalletAddress)} ·{" "}
-        <span style={{ color: plan.livePctCovered === 100 ? C.accent : C.warn }}>
-          {plan.livePctCovered}% LIVE
+        <span style={{ color: plan.liveFraction === 1 ? C.accent : C.warn }}>
+          {Math.round(plan.liveFraction * 100)}% LIVE
         </span>
       </div>
     </div>
@@ -513,30 +514,33 @@ function StepRow({
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: -0.2 }}>{step.label}</div>
             <div style={{ fontSize: 11, color: C.sub, marginTop: 2 }}>
-              {step.signer === "embedded" ? "YOU SIGN" : "SERVER SIGNS"} ·{" "}
-              {step.platform ?? step.asset}
+              {step.signer === "embedded" ? "YOU SIGN" : "WAYFINDER"} ·{" "}
+              {step.strategyName ?? step.kind.toUpperCase()}
             </div>
           </div>
         </div>
         <StatusBadge state={state} planStatus={step.status} />
       </div>
-      {state.txHash && (
-        <a
-          href={`https://basescan.org/tx/${state.txHash}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            display: "inline-block",
-            marginTop: 8,
-            fontFamily: C.mono,
-            fontSize: 10,
-            color: C.accent,
-            letterSpacing: 0.4,
-            textDecoration: "none",
-          }}
-        >
-          ↗ {shortAddr(state.txHash)}
-        </a>
+      {state.txHashes && state.txHashes.length > 0 && (
+        <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {state.txHashes.map((h) => (
+            <a
+              key={h}
+              href={`https://basescan.org/tx/${h}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                fontFamily: C.mono,
+                fontSize: 10,
+                color: C.accent,
+                letterSpacing: 0.4,
+                textDecoration: "none",
+              }}
+            >
+              ↗ {shortAddr(h)}
+            </a>
+          ))}
+        </div>
       )}
       {state.error && (
         <div style={{ color: C.danger, fontFamily: C.mono, fontSize: 10, marginTop: 6 }}>
