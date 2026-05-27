@@ -5,7 +5,8 @@ A single-question crypto investing app: **how loud do you want to be?**
 The user drags one dial (0–100). That risk score maps to one of five discrete strategy profiles (Stable Lender → Max Speculation), each with an allocation across eight asset classes and a routing map of execution venues per class. Live APYs are blended from DefiLlama and rendered next to each venue.
 
 - **Strategies & routing:** [`STRATEGIES.md`](./STRATEGIES.md)
-- **Stack:** Next.js 15 (App Router) · React 19 · TypeScript · Privy (wallet) · DefiLlama (live yields) · Vercel
+- **EXECUTE_PLAN flow + Wayfinder integration:** [`EXECUTION.md`](./EXECUTION.md)
+- **Stack:** Next.js 15 (App Router) · React 19 · TypeScript · Privy embedded + server wallets · viem · DefiLlama (live yields) · Wayfinder Python sidecar · Vercel
 
 ## Local dev
 

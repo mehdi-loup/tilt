@@ -1,11 +1,21 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { themeForRisk, type Theme } from "@/lib/tilt";
 import { Dial } from "@/components/Dial";
 import { Plan } from "@/components/Plan";
-import { FundModal } from "@/components/FundModal";
 import { WalletChip } from "@/components/WalletChip";
+
+// Lazy-load the modal — its Privy embedded-wallet signing code is heavy
+// and only needed when the user actually clicks EXECUTE_PLAN.
+const TransactionPlanModal = dynamic(
+  () =>
+    import("@/components/TransactionPlanModal").then((m) => ({
+      default: m.TransactionPlanModal,
+    })),
+  { ssr: false },
+);
 
 const C = {
   bg: "#0b0d10",
@@ -37,7 +47,7 @@ export default function Page() {
         <CTA onFund={() => setFunding(true)} />
         <Footer />
       </main>
-      {funding && <FundModal risk={risk} onClose={() => setFunding(false)} />}
+      {funding && <TransactionPlanModal risk={risk} onClose={() => setFunding(false)} />}
     </>
   );
 }
@@ -107,7 +117,7 @@ function Centerpiece({
             letterSpacing: -1.4,
           }}
         >
-          How loud do you want to be?
+          How much risk do you like?
         </h1>
       </div>
       <Dial risk={risk} setRisk={setRisk} size={460} theme={theme} />
