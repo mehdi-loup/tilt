@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { usePrivy, useSendTransaction, useWallets } from "@privy-io/react-auth";
+import { useCreateWallet, usePrivy, useSendTransaction, useWallets } from "@privy-io/react-auth";
 import type { Plan, PlanStep } from "@/lib/strategy-plan";
 
 const C = {
@@ -35,15 +35,18 @@ interface Props {
 }
 
 export function TransactionPlanModal({ risk, onClose }: Props) {
-  const { authenticated, getAccessToken } = usePrivy();
+  const { authenticated, getAccessToken, login } = usePrivy();
   const { wallets } = useWallets();
+  const { createWallet } = useCreateWallet();
   const { sendTransaction } = useSendTransaction();
 
-  const embedded = wallets.find((w) => w.walletClientType === "privy") ?? wallets[0];
+  const embedded = wallets.find((w) => w.walletClientType === "privy");
   const [amount, setAmount] = useState(250);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [planErr, setPlanErr] = useState<string | null>(null);
+  const [walletErr, setWalletErr] = useState<string | null>(null);
   const [building, setBuilding] = useState(false);
+  const [creatingWallet, setCreatingWallet] = useState(false);
   const [steps, setSteps] = useState<Record<string, StepState>>({});
   const [running, setRunning] = useState(false);
 
@@ -83,19 +86,40 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
     }
   }, [amount, authenticated, embedded, getAccessToken, risk]);
 
+  const createEmbeddedWallet = useCallback(async () => {
+    if (!authenticated) {
+      login();
+      return;
+    }
+    setCreatingWallet(true);
+    setWalletErr(null);
+    try {
+      await createWallet();
+    } catch (err) {
+      setWalletErr(err instanceof Error ? err.message : "wallet creation failed");
+    } finally {
+      setCreatingWallet(false);
+    }
+  }, [authenticated, createWallet, login]);
+
   const runFundStep = useCallback(
     async (step: PlanStep): Promise<StepState> => {
+      if (!embedded) throw new Error("no embedded wallet");
       if (!step.tx) throw new Error("fund step missing pre-built tx");
-      const { hash } = await sendTransaction({
-        to: step.tx.to,
-        data: step.tx.data,
-        value: step.tx.value,
-        chainId: step.tx.chainId,
-      });
+      const { hash } = await sendTransaction(
+        {
+          from: embedded.address,
+          to: step.tx.to,
+          data: step.tx.data,
+          value: step.tx.value,
+          chainId: step.tx.chainId,
+        },
+        { address: embedded.address },
+      );
       await waitForBaseReceipt(hash);
       return { status: "success", txHashes: [hash] };
     },
-    [sendTransaction],
+    [embedded, sendTransaction],
   );
 
   const runServerStep = useCallback(
@@ -157,13 +181,48 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
   const canExecute = !!plan && plan.executable && amount >= plan.minimumAmountUsd;
 
   if (!authenticated || !embedded) {
+    const title = authenticated ? "CREATE EMBEDDED WALLET" : "CONNECT WALLET";
+    const copy = authenticated
+      ? "Create your Privy embedded wallet first. Funding transactions must be signed by that wallet, not an external connected wallet."
+      : "Connect your wallet first. Tilt will create a Privy embedded wallet for funding signatures.";
     return (
       <Backdrop onClose={onClose}>
         <Panel>
           <Header onClose={onClose} title="CONFIRM_FUNDING" />
           <p style={{ color: C.sub, fontSize: 13, marginTop: 20 }}>
-            Connect your wallet first — the funding step needs your embedded wallet to sign.
+            {copy}
           </p>
+          {walletErr && (
+            <div
+              style={{
+                color: C.danger,
+                fontFamily: C.mono,
+                fontSize: 11,
+                marginTop: 16,
+              }}
+            >
+              {walletErr}
+            </div>
+          )}
+          <button
+            onClick={authenticated ? createEmbeddedWallet : login}
+            disabled={creatingWallet}
+            style={{
+              width: "100%",
+              background: creatingWallet ? "transparent" : C.accent,
+              color: creatingWallet ? C.sub : C.bg,
+              border: creatingWallet ? `1px solid ${C.dim2}` : "none",
+              padding: "14px",
+              marginTop: 20,
+              fontSize: 13,
+              fontWeight: 700,
+              fontFamily: C.mono,
+              letterSpacing: 1,
+              cursor: creatingWallet ? "not-allowed" : "pointer",
+            }}
+          >
+            {creatingWallet ? "CREATING…" : title}
+          </button>
         </Panel>
       </Backdrop>
     );

@@ -13,7 +13,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
           logo: undefined,
         },
         embeddedWallets: {
-          ethereum: { createOnLogin: "users-without-wallets" },
+          ethereum: { createOnLogin: "all-users" },
         },
       }}
     >
