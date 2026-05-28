@@ -22,6 +22,7 @@ pnpm dev                        # http://localhost:3000
 | --- | --- | --- |
 | `NEXT_PUBLIC_PRIVY_APP_ID` | Privy dashboard → Settings | Public |
 | `PRIVY_APP_SECRET` | Privy dashboard → Settings | Server-only |
+| `WAYFINDER_INTERNAL_SECRET` | Generate a random server secret | Optional; protects internal Next.js → Python sidecar POSTs. Falls back to `PRIVY_APP_SECRET`. |
 
 ## Architecture notes
 

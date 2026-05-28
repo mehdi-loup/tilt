@@ -1,108 +1,135 @@
 # Transaction Plan Execution
 
-How EXECUTE_PLAN deploys the user's strategy on-chain.
+How `EXECUTE_PLAN` deploys a strategy on-chain.
+
+## Current Status
+
+Only **Stable Lender** is executable today. It dispatches the user's funded server wallet to Wayfinder's `stablecoin_yield_strategy` on Base.
+
+The other four profiles are **preview-only**. They render planned Wayfinder strategy steps with `STUB` badges and `pendingNote` text, but the modal does not show `SIGN & EXECUTE` and does not create any funding transfer for those profiles.
 
 ## Architecture
 
 ```
-┌──────────────┐    ┌─────────────────────────┐    ┌──────────────────────┐
-│   Browser    │    │  Next.js (Vercel)       │    │  Wayfinder sidecar   │
-│              │    │                         │    │  (Python, Vercel)    │
-│  Privy       │    │  /api/wallet/server     │    │                      │
-│  embedded    │    │  /api/plan/build        │    │  /api/wayfinder/     │
-│  wallet      │◄──►│  /api/plan/execute-step │◄──►│       execute        │
-│              │    │  - thin orchestrator    │    │  - Privy→Wayfinder   │
-└──────────────┘    └─────────────┬───────────┘    │    sign adapter      │
-                                  │                │  - Wayfinder strategy│
-                                  ▼                │    .deposit()        │
-                       ┌───────────────────┐       └──────────────────────┘
-                       │  Privy walletApi  │                  │
-                       │  (signs as user-  │                  ▼
-                       │  owned server     │      ┌───────────────────┐
-                       │  wallet)          │      │  Base / HyperEVM  │
-                       └───────────────────┘      │  / Hyperliquid    │
-                                                  │  (Wayfinder picks)│
-                                                  └───────────────────┘
+Browser / Privy embedded wallet
+  └─ signs Base ETH gas funding + USDC funding
+
+Next.js API
+  ├─ /api/plan/build
+  ├─ /api/plan/execute-step
+  └─ Privy server-wallet provisioning
+
+Python sidecar
+  └─ /api/wayfinder/execute
+      ├─ protected by x-tilt-internal-secret
+      ├─ wraps Privy wallet RPC as a Wayfinder signing callback
+      └─ runs Wayfinder strategy.deposit(...)
 ```
 
-## Two wallets per user
+## Wallets
 
-1. **Embedded wallet** — user owns it. Privy holds the key in a TEE; only the user signs. Holds the user's funds.
-2. **Server wallet** — provisioned on first EXECUTE_PLAN. App-owned via Privy's `walletApi.createWallet`. Drives Wayfinder strategy steps without per-tx popups.
+- **Embedded wallet**: user-controlled Privy wallet. It holds the user's funds and signs funding transfers.
+- **Server wallet**: app-owned Privy wallet provisioned per user. It receives funds and is driven by Wayfinder through the Privy signing adapter.
 
-## The flow
+Known limitation: `lib/wallet-registry.ts` still stores `userId -> walletId` in-process. Replace it with KV/Postgres before real users.
 
-1. **Connect** — user clicks CONNECT, Privy modal opens, user authenticates.
-2. **Dial** — user picks risk score; the Plan panel shows the profile, allocation, and live APYs.
-3. **EXECUTE_PLAN** → modal opens.
-4. **Build plan** — `POST /api/plan/build` with `{ risk, amountUsd }`. Server provisions a Privy server wallet for this user (or reuses), generates the `Plan` (`lib/strategy-plan.ts`): one funding step + one step per Wayfinder strategy in the profile's composition.
-5. **Sign & execute** — modal walks the steps:
-   - **Step 0 (fund)** — `useSendTransaction()` (Privy embedded wallet) signs the USDC.transfer from embedded → server wallet. The only step with a wallet popup.
-   - **Steps 1..N (strategy)** — `POST /api/plan/execute-step`. The Next.js handler:
-     1. Verifies the user's JWT
-     2. Looks up the server wallet
-     3. Forwards `{ profileId, amountUsd, walletId, walletAddress, userJwt }` to `/api/wayfinder/execute`
-   - The Python sidecar:
-     1. Builds a `privy_sign_callback` that calls Privy's wallet RPC (`POST /v1/wallets/{walletId}/rpc` method `eth_signTransaction`) with the app's HTTP basic auth, returns raw signed-tx bytes
-     2. Instantiates the Wayfinder `Strategy` class with `main_wallet_signing_callback=privy_sign_callback`
-     3. Calls `await strategy.deposit(main_token_amount=amountUsd)`
-     4. Returns `{ source: "live", txHashes: [...], status: <StatusDict> }`
-6. **Status** — each step row shows READY → PENDING → DONE | STUB | FAIL. Each Wayfinder strategy may emit multiple tx hashes (the modal renders all as Basescan links).
+## Execution Flow
 
-## The Privy adapter
+1. User connects with Privy.
+2. User opens `EXECUTE_PLAN`.
+3. Client calls `POST /api/plan/build`.
+4. Server provisions or reuses the user's server wallet and builds a `Plan`.
+5. If `plan.executable === false`, the modal shows preview-only steps and no execute button.
+6. If executable, the modal walks steps in order:
+   - `fund-gas`: embedded wallet sends a small Base ETH gas float to the server wallet.
+   - `fund-usdc`: embedded wallet sends the strategy USDC amount to the server wallet.
+   - Each funding tx is receipt-polled before the next step starts.
+   - `strategy-*`: Next.js calls the Python sidecar to run Wayfinder.
+7. Sidecar runs Wayfinder and returns `{ source: "live", txHashes, status }`.
 
-The whole bridge is one closure (`api/wayfinder/execute.py`):
+## Sidecar Auth
+
+`POST /api/wayfinder/execute` is not public API. It requires:
+
+- `x-tilt-internal-secret`: shared internal secret. Uses `WAYFINDER_INTERNAL_SECRET` if set; otherwise falls back to `PRIVY_APP_SECRET`.
+- `Authorization: Bearer <privy-user-access-token>`: forwarded by the authenticated Next.js route.
+
+Direct client calls without the internal secret return `403`.
+
+## Privy Signing Adapter
+
+The sidecar creates a Wayfinder signing callback around Privy's wallet RPC:
 
 ```python
 def make_privy_sign_callback(wallet_id, wallet_address, caip2):
     async def sign_callback(transaction: dict) -> bytes:
         transaction = {**transaction, "from": wallet_address}
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"https://api.privy.io/v1/wallets/{wallet_id}/rpc",
-                auth=(PRIVY_APP_ID, PRIVY_APP_SECRET),
-                json={
-                    "method": "eth_signTransaction",
-                    "caip2": caip2,
-                    "params": {"transaction": _prepare_tx_for_privy(transaction)},
-                },
-            )
+        resp = await client.post(
+            f"https://api.privy.io/v1/wallets/{wallet_id}/rpc",
+            auth=(PRIVY_APP_ID, PRIVY_APP_SECRET),
+            headers={"privy-app-id": PRIVY_APP_ID},
+            json={
+                "method": "eth_signTransaction",
+                "caip2": caip2,
+                "params": {"transaction": _prepare_tx_for_privy(transaction)},
+            },
+        )
         signed = resp.json()["data"]["signed_transaction"]
         return bytes.fromhex(signed.removeprefix("0x"))
     return sign_callback
 ```
 
-Wayfinder's `StrategyClass.__init__` already accepts `main_wallet_signing_callback` and `strategy_wallet_signing_callback` parameters with shape `Callable[[dict], Awaitable[bytes]]`. The adapter slots in cleanly — no monkey-patching, no fork.
+Wayfinder receives that callback through `main_wallet_signing_callback` and `strategy_wallet_signing_callback`.
 
-## What's live today
+## Live Coverage
 
 | Profile | Status |
 | --- | --- |
-| Stable Lender | **LIVE** — Wayfinder `stablecoin_yield_strategy` on Base, full deposit() runs |
-| Conservative Yield | STUB — needs Base → HyperEVM bridge + composition runner |
-| Balanced DeFi | STUB — same |
-| Aggressive Growth | STUB — needs Hyperliquid + HyperEVM bridges |
-| Max Speculation | STUB — multi-chain composition |
+| Stable Lender | **LIVE**: Base `stablecoin_yield_strategy`, minimum `$2` |
+| Conservative Yield | Preview-only: needs composition runner + Base -> HyperEVM bridge |
+| Balanced DeFi | Preview-only: needs composition runner + bridges |
+| Aggressive Growth | Preview-only: needs Hyperliquid/HyperEVM bridges |
+| Max Speculation | Preview-only: needs multi-chain composition |
 
-The 4 stub profiles render their planned strategy steps in the modal with explicit `STUB` badges and `pendingNote` text. The sidecar returns `source: "stub"` (not an error) so the plan walks end-to-end without throwing.
+## Environment
 
-## What's needed next
+| Key | Purpose |
+| --- | --- |
+| `NEXT_PUBLIC_PRIVY_APP_ID` | Client-side Privy app id |
+| `PRIVY_APP_SECRET` | Server-side Privy auth and fallback sidecar secret |
+| `WAYFINDER_INTERNAL_SECRET` | Optional explicit Next.js -> sidecar shared secret |
 
-1. **Wayfinder install on Vercel Python** — `api/wayfinder/requirements.txt` pins `wayfinder-paths`. Vercel's Python builder needs to resolve this from PyPI on deploy. If the package fails to install in the lambda, `GET /api/wayfinder/execute` reports `wayfinderInstalled: false`.
-2. **Cross-chain bridging** — pick one (CCTP recommended for native USDC). Add a "bridge" step kind to `lib/strategy-plan.ts` that runs before the destination-chain strategy.
-3. **Composition runner** — when a profile invokes >1 strategy, split the amount, run each, reconcile. Lives in the Python sidecar so the TS doesn't need to know.
-4. **Receipt confirmation** — `strategy.deposit()` returns once tx is broadcast, not confirmed. For accurate `DONE` status, poll receipts after.
-5. **Privy server-wallet persistence** — `lib/wallet-registry.ts` uses an in-process Map. Replace with KV / Postgres before any real users (otherwise duplicate wallets per region).
+Privy dashboard requirement: server wallet creation must be enabled for the app before production calls to `walletApi.createWallet`.
 
-## What this repo no longer does
+## What Still Needs Work
 
-We **don't** build calldata for individual venues here. Files like `lib/tx-builders.ts` (the previous version had Aave Pool + Uniswap V3 routers + a slippage helper) are stripped — Wayfinder is the source of truth for protocol-specific logic. `tx-builders.ts` retains only the ERC-20 `transfer` helper for the funding step (which the user signs from their embedded wallet, not the server).
+1. **Deploy-test Stable Lender**
+   - Confirm Vercel Python installs `wayfinder-paths`.
+   - Confirm the real Wayfinder strategy constructor and callback contract match the adapter.
+   - Test with risk `0-20`, amount `>= $2`, and embedded wallet holding Base USDC + Base ETH.
 
-## Test locally
+2. **Persist server wallets**
+   - Replace the in-process registry with KV/Postgres.
+
+3. **Strategy receipt polling**
+   - Funding txs are receipt-polled.
+   - Wayfinder strategy tx hashes are still trusted as returned; add receipt polling after Wayfinder returns.
+
+4. **Withdrawal / recovery**
+   - Add a way to withdraw idle USDC/ETH from the server wallet.
+
+5. **Profiles 2-5**
+   - Add bridge steps.
+   - Add sidecar composition runner.
+   - Split amounts per strategy and reconcile status/receipts.
+
+## Local Checks
 
 ```bash
-pnpm dev
-curl http://localhost:3000/api/wayfinder/execute        # GET → service status
+pnpm build
+env PYTHONPYCACHEPREFIX=/private/tmp/tilt-pycache python3 -m py_compile api/wayfinder/execute.py
 ```
 
-`GET /api/wayfinder/execute` reports `wayfinderInstalled: true` once the Python package resolves. In local dev without the package installed, it returns `false` and `POST` returns `503 missing-dep`. That's the expected state until Vercel builds the Python lambda with `wayfinder-paths` from PyPI.
+`pnpm lint` currently prompts for Next.js ESLint setup and is not non-interactive yet.
+
+`GET /api/wayfinder/execute` reports sidecar health and whether `wayfinder_paths` is importable in that Python runtime.

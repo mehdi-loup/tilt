@@ -14,27 +14,13 @@ server-side so multi-step strategies don't require a wallet popup per step.
 
 ## Current status
 
-**Scaffolded, not yet wired to live strategy execution.**
+Stable Lender dispatches to Wayfinder's `stablecoin_yield_strategy` through
+the Privy signing callback in `api/wayfinder/execute.py`. The other four
+profiles are preview-only until bridging and composition are implemented.
 
-The function currently validates inputs (`strategy`, `walletId`, `amountUsd`,
-user JWT) and returns a deterministic placeholder so the Next.js execution
-flow can be exercised end-to-end.
-
-To finish wiring:
-
-1. **Wayfinder Privy adapter** — Wayfinder's `WalletClient.list_wallets`
-   pattern fetches Privy server wallets via `system.api_key`. We need
-   either: (a) register our app's Privy app secret with Wayfinder, or (b)
-   patch Wayfinder's `core.utils.wallets` to accept a wallet id + user JWT
-   directly and call `privy.walletApi.rpc(...)` with that auth context.
-
-2. **Strategy mapping** — Our `RiskProfileId` (5 profiles) needs to compose
-   one or more Wayfinder strategies. See `SUPPORTED_STRATEGIES` in
-   `execute.py` for the proposed mapping; the real strategy-to-profile
-   composition is in `lib/strategy-plan.ts` on the Next.js side.
-
-3. **Chain config** — Wayfinder strategies are chain-pinned (Base, Hyperliquid,
-   HyperEVM, etc.). Confirm RPC URLs + chain ids in env vars before live runs.
+The POST endpoint is not public API. Next.js calls it with
+`x-tilt-internal-secret`; direct browser/client calls are rejected before any
+wallet id is trusted.
 
 ## Env vars
 
@@ -43,6 +29,7 @@ To finish wiring:
 | `WAYFINDER_API_KEY` | `wk_…` from strategies.wayfinder.ai. Required for Wayfinder's remote-wallet feature. |
 | `PRIVY_APP_SECRET` | Used by the Wayfinder→Privy adapter to authenticate signing requests. |
 | `PRIVY_APP_ID` | Same. |
+| `WAYFINDER_INTERNAL_SECRET` | Optional internal Next.js → sidecar shared secret. Falls back to `PRIVY_APP_SECRET`. |
 | `BASE_RPC_URL` | Base mainnet RPC (Alchemy/QuickNode). For now `https://mainnet.base.org`. |
 
 ## Deployment
@@ -54,7 +41,8 @@ Local invocation:
 
 ```bash
 curl -X POST https://tilt-hazel.vercel.app/api/wayfinder/execute \
+  -H "x-tilt-internal-secret: $WAYFINDER_INTERNAL_SECRET" \
   -H "authorization: Bearer $PRIVY_USER_JWT" \
   -H "content-type: application/json" \
-  -d '{"strategy":"stable_lender","walletId":"<wallet-id>","amountUsd":250}'
+  -d '{"profileId":"stable_lender","walletId":"<wallet-id>","walletAddress":"0x...","amountUsd":250}'
 ```

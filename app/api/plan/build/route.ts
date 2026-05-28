@@ -41,5 +41,11 @@ export async function POST(req: Request) {
     embeddedWalletAddress: body.embeddedWalletAddress,
     serverWalletAddress: wallet.address,
   });
+  if (plan.executable && body.amountUsd < plan.minimumAmountUsd) {
+    return NextResponse.json(
+      { error: `amountUsd must be >= ${plan.minimumAmountUsd}` },
+      { status: 400 },
+    );
+  }
   return NextResponse.json({ plan, serverWallet: wallet });
 }

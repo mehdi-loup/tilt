@@ -3,9 +3,8 @@
 // A Plan is a sequence of Steps that, when run in order, deploys the
 // user's chosen risk profile by handing off to Wayfinder strategies.
 //
-//   - `fund`     — user signs from their embedded wallet (the only step
-//                  that requires a wallet popup). Sends USDC from
-//                  embedded → server wallet on Base.
+//   - `fund`     — user signs from their embedded wallet. Sends Base ETH
+//                  gas and USDC from embedded → server wallet.
 //   - `strategy` — server dispatches to api/wayfinder/execute, which
 //                  drives a Wayfinder strategy against the user's Privy
 //                  server wallet. Multi-tx internally; reported as one
@@ -19,7 +18,12 @@
 import { profileFor, type RiskProfileId } from "./tilt";
 import { FUNDING_CHAIN_ID, TOKENS } from "./chains";
 import { buildErc20Transfer } from "./tx-builders";
-import { PROFILE_COMPOSITION, type StrategyInvocation } from "./profile-strategies";
+import {
+  PROFILE_COMPOSITION,
+  isProfileExecutable,
+  minimumAmountUsd,
+  type StrategyInvocation,
+} from "./profile-strategies";
 import type { Hex } from "viem";
 
 export type PlanStepKind = "fund" | "strategy";
@@ -63,6 +67,8 @@ export interface Plan {
   profileId: RiskProfileId;
   profileName: string;
   amountUsd: number;
+  minimumAmountUsd: number;
+  executable: boolean;
   serverWalletAddress: string;
   embeddedWalletAddress: string;
   steps: PlanStep[];
@@ -86,34 +92,55 @@ export function buildPlan({
   const profile = profileFor(risk);
   const composition = PROFILE_COMPOSITION[profile.id];
   const totalUnits = BigInt(Math.round(amountUsd * 1_000_000)); // USDC base units
+  const executable = isProfileExecutable(profile.id);
+  const minAmountUsd = minimumAmountUsd(profile.id);
 
   const steps: PlanStep[] = [];
 
-  // Step 0 — fund the server wallet from the user's embedded wallet.
-  const fundTx = buildErc20Transfer(
-    TOKENS.USDC,
-    serverWalletAddress as Hex,
-    totalUnits,
-  );
-  steps.push({
-    id: "fund",
-    kind: "fund",
-    label: `Fund execution wallet · ${amountUsd} USDC`,
-    description: `Transfer ${amountUsd} USDC from your wallet to your execution wallet (${shortAddr(
-      serverWalletAddress,
-    )}). The only step you sign with your own wallet — every step after is signed server-side from this wallet.`,
-    signer: "embedded",
-    status: "live",
-    chainId: FUNDING_CHAIN_ID,
-    amountUnits: totalUnits.toString(),
-    amountUsd,
-    tx: {
-      to: fundTx.to,
-      data: fundTx.data,
-      value: "0x0",
+  if (executable) {
+    steps.push({
+      id: "fund-gas",
+      kind: "fund",
+      label: `Fund gas · ${formatEth(GAS_FUNDING_WEI)} ETH`,
+      description: `Transfer ${formatEth(
+        GAS_FUNDING_WEI,
+      )} ETH on Base so the execution wallet can pay gas for Wayfinder transactions.`,
+      signer: "embedded",
+      status: "live",
       chainId: FUNDING_CHAIN_ID,
-    },
-  });
+      tx: {
+        to: serverWalletAddress,
+        data: "0x",
+        value: `0x${GAS_FUNDING_WEI.toString(16)}`,
+        chainId: FUNDING_CHAIN_ID,
+      },
+    });
+
+    const fundTx = buildErc20Transfer(
+      TOKENS.USDC,
+      serverWalletAddress as Hex,
+      totalUnits,
+    );
+    steps.push({
+      id: "fund-usdc",
+      kind: "fund",
+      label: `Fund execution wallet · ${amountUsd} USDC`,
+      description: `Transfer ${amountUsd} USDC from your wallet to your execution wallet (${shortAddr(
+        serverWalletAddress,
+      )}).`,
+      signer: "embedded",
+      status: "live",
+      chainId: FUNDING_CHAIN_ID,
+      amountUnits: totalUnits.toString(),
+      amountUsd,
+      tx: {
+        to: fundTx.to,
+        data: fundTx.data,
+        value: "0x0",
+        chainId: FUNDING_CHAIN_ID,
+      },
+    });
+  }
 
   // One step per Wayfinder strategy invocation declared by the profile.
   composition.steps.forEach((inv, idx) => {
@@ -140,11 +167,21 @@ export function buildPlan({
     profileId: profile.id,
     profileName: profile.name,
     amountUsd,
+    minimumAmountUsd: minAmountUsd,
+    executable,
     serverWalletAddress,
     embeddedWalletAddress,
     steps,
     liveFraction: composition.steps.length === 0 ? 0 : liveCount / composition.steps.length,
   };
+}
+
+const GAS_FUNDING_WEI = 500_000_000_000_000n;
+
+function formatEth(wei: bigint): string {
+  const whole = wei / 1_000_000_000_000_000_000n;
+  const frac = (wei % 1_000_000_000_000_000_000n).toString().padStart(18, "0");
+  return `${whole}.${frac.slice(0, 4)}`;
 }
 
 function describeInvocation(inv: StrategyInvocation, stepUsd: number): string {

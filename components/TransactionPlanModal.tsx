@@ -17,6 +17,8 @@ const C = {
   mono: '"JetBrains Mono", ui-monospace, monospace',
 } as const;
 
+const MIN_EXECUTE_USD = 2;
+
 type StepRuntimeStatus = "idle" | "running" | "success" | "stub" | "error";
 
 interface StepState {
@@ -90,6 +92,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
         value: step.tx.value,
         chainId: step.tx.chainId,
       });
+      await waitForBaseReceipt(hash);
       return { status: "success", txHashes: [hash] };
     },
     [sendTransaction],
@@ -151,6 +154,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
       return st === "success" || st === "stub";
     });
   }, [plan, steps]);
+  const canExecute = !!plan && plan.executable && amount >= plan.minimumAmountUsd;
 
   if (!authenticated || !embedded) {
     return (
@@ -177,6 +181,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
             onBuild={buildPlan}
             building={building}
             err={planErr}
+            minAmount={MIN_EXECUTE_USD}
           />
         )}
 
@@ -205,24 +210,41 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
 
             <div style={{ marginTop: 24, display: "flex", flexDirection: "column", gap: 12 }}>
               {!allDone && (
-                <button
-                  onClick={runPlan}
-                  disabled={running}
-                  style={{
-                    width: "100%",
-                    background: running ? "transparent" : C.accent,
-                    color: running ? C.sub : C.bg,
-                    border: running ? `1px solid ${C.dim2}` : "none",
-                    padding: "16px",
-                    fontSize: 14,
-                    fontWeight: 700,
-                    fontFamily: C.mono,
-                    letterSpacing: 1,
-                    cursor: running ? "not-allowed" : "pointer",
-                  }}
-                >
-                  {running ? "EXECUTING…" : "SIGN & EXECUTE →"}
-                </button>
+                canExecute ? (
+                  <button
+                    onClick={runPlan}
+                    disabled={running}
+                    style={{
+                      width: "100%",
+                      background: running ? "transparent" : C.accent,
+                      color: running ? C.sub : C.bg,
+                      border: running ? `1px solid ${C.dim2}` : "none",
+                      padding: "16px",
+                      fontSize: 14,
+                      fontWeight: 700,
+                      fontFamily: C.mono,
+                      letterSpacing: 1,
+                      cursor: running ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    {running ? "EXECUTING…" : "SIGN & EXECUTE →"}
+                  </button>
+                ) : (
+                  <div
+                    style={{
+                      padding: 16,
+                      border: `1px solid ${C.warn}`,
+                      color: C.warn,
+                      fontFamily: C.mono,
+                      fontSize: 11,
+                      letterSpacing: 0.7,
+                      lineHeight: 1.5,
+                      textAlign: "center",
+                    }}
+                  >
+                    PLAN PREVIEW ONLY · STRATEGY COMPOSITION NOT YET EXECUTABLE
+                  </div>
+                )
               )}
               {allDone && (
                 <div
@@ -248,7 +270,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
                   textAlign: "center",
                 }}
               >
-                MAINNET BASE · USDC · LIVE TRANSACTIONS
+                {plan.executable ? "MAINNET BASE · USDC + ETH GAS · LIVE TRANSACTIONS" : "PREVIEW · NO FUNDS MOVE"}
               </div>
             </div>
           </>
@@ -347,12 +369,14 @@ function PlanIntake({
   onBuild,
   building,
   err,
+  minAmount,
 }: {
   amount: number;
   onAmount: (v: number) => void;
   onBuild: () => void;
   building: boolean;
   err: string | null;
+  minAmount: number;
 }) {
   return (
     <div style={{ marginTop: 24 }}>
@@ -370,7 +394,7 @@ function PlanIntake({
       <input
         type="number"
         value={amount}
-        min={1}
+        min={minAmount}
         onChange={(e) => onAmount(Math.max(0, Number(e.target.value) || 0))}
         style={{
           width: "100%",
@@ -420,18 +444,18 @@ function PlanIntake({
       )}
       <button
         onClick={onBuild}
-        disabled={building || amount < 1}
+        disabled={building || amount < minAmount}
         style={{
           width: "100%",
-          background: building || amount < 1 ? "transparent" : C.accent,
-          color: building || amount < 1 ? C.sub : C.bg,
-          border: building || amount < 1 ? `1px solid ${C.dim2}` : "none",
+          background: building || amount < minAmount ? "transparent" : C.accent,
+          color: building || amount < minAmount ? C.sub : C.bg,
+          border: building || amount < minAmount ? `1px solid ${C.dim2}` : "none",
           padding: "14px",
           fontSize: 13,
           fontWeight: 700,
           fontFamily: C.mono,
           letterSpacing: 1,
-          cursor: building || amount < 1 ? "not-allowed" : "pointer",
+          cursor: building || amount < minAmount ? "not-allowed" : "pointer",
         }}
       >
         {building ? "BUILDING PLAN…" : "BUILD PLAN →"}
@@ -604,6 +628,35 @@ function colorForState(s: StepRuntimeStatus, planStatus: "live" | "stub"): strin
   if (s === "error") return C.danger;
   if (s === "stub" || planStatus === "stub") return C.warn;
   return C.dim2;
+}
+
+async function waitForBaseReceipt(hash: string): Promise<void> {
+  for (let attempt = 0; attempt < 90; attempt++) {
+    const res = await fetch("https://mainnet.base.org", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_getTransactionReceipt",
+        params: [hash],
+      }),
+    });
+    const body = (await res.json().catch(() => null)) as
+      | { result?: { status?: string } | null }
+      | null;
+    const receipt = body?.result;
+    if (receipt) {
+      if (receipt.status === "0x0") throw new Error("funding transaction reverted");
+      return;
+    }
+    await sleep(2000);
+  }
+  throw new Error("funding transaction was not confirmed in time");
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function shortAddr(a: string): string {

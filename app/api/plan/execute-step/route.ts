@@ -67,6 +67,29 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
+  if (step.status !== "live") {
+    return NextResponse.json({
+      ok: true,
+      source: "stub",
+      stepId: step.id,
+      note: `${step.label} is not executable yet.`,
+      txHashes: [],
+    });
+  }
+  if (body.amountUsd < plan.minimumAmountUsd) {
+    return NextResponse.json(
+      { ok: false, error: `amountUsd must be >= ${plan.minimumAmountUsd}` },
+      { status: 400 },
+    );
+  }
+
+  const internalSecret = process.env.WAYFINDER_INTERNAL_SECRET ?? process.env.PRIVY_APP_SECRET;
+  if (!internalSecret) {
+    return NextResponse.json(
+      { ok: false, error: "Wayfinder internal secret is not configured" },
+      { status: 500 },
+    );
+  }
 
   // Dispatch to the Wayfinder Python sidecar at /api/wayfinder/execute.
   // Same project, same domain — Vercel routes /api/*.py to the Python
@@ -78,6 +101,7 @@ export async function POST(req: Request) {
       method: "POST",
       headers: {
         "content-type": "application/json",
+        "x-tilt-internal-secret": internalSecret,
         // Forward the user's Privy JWT so the sidecar can also enforce auth.
         authorization: `Bearer ${user.jwt}`,
       },

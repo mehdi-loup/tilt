@@ -15,8 +15,10 @@ Request body (POST /api/wayfinder/execute):
       "caip2": "eip155:8453"   # optional, defaults to Base
     }
 
-Auth: Authorization: Bearer <privy-user-access-token>  (forwarded from
-the Next.js side after verifyAuthToken).
+Auth:
+  - x-tilt-internal-secret: shared Next.js → Python sidecar secret
+  - Authorization: Bearer <privy-user-access-token>  (forwarded from the
+    Next.js side after verifyAuthToken).
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ PRIVY_APP_ID = os.environ.get("PRIVY_APP_ID") or os.environ.get(
     "NEXT_PUBLIC_PRIVY_APP_ID", ""
 )
 PRIVY_APP_SECRET = os.environ.get("PRIVY_APP_SECRET", "")
+INTERNAL_SECRET = os.environ.get("WAYFINDER_INTERNAL_SECRET") or PRIVY_APP_SECRET
 
 DEFAULT_CAIP2 = "eip155:8453"  # Base mainnet
 
@@ -69,6 +72,13 @@ PROFILE_STRATEGIES: dict[str, dict[str, Any]] = {
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 — required by BaseHTTPRequestHandler
+        if not INTERNAL_SECRET:
+            self._respond(503, {"error": "internal sidecar secret is not configured"})
+            return
+        if self.headers.get("x-tilt-internal-secret") != INTERNAL_SECRET:
+            self._respond(403, {"error": "forbidden"})
+            return
+
         length = int(self.headers.get("content-length", "0"))
         raw = self.rfile.read(length) if length else b"{}"
         try:

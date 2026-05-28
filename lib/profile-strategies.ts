@@ -143,3 +143,14 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
     ],
   },
 };
+
+export function isProfileExecutable(profileId: RiskProfileId): boolean {
+  const steps = PROFILE_COMPOSITION[profileId].steps;
+  return steps.length > 0 && steps.every((step) => step.status === "live");
+}
+
+export function minimumAmountUsd(profileId: RiskProfileId): number {
+  const liveSteps = PROFILE_COMPOSITION[profileId].steps.filter((step) => step.status === "live");
+  if (liveSteps.length === 0) return 1;
+  return Math.max(...liveSteps.map((step) => step.minAmountUsd));
+}
