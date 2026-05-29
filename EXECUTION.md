@@ -12,10 +12,11 @@ The other four profiles are **preview-only**. They render planned Wayfinder stra
 
 ```
 Browser / Privy embedded wallet
-  └─ signs Base ETH gas funding + USDC funding
+  └─ signs the Wayfinder-built funding transactions (+ a Base ETH gas float)
 
 Next.js API
-  ├─ /api/plan/build
+  ├─ /api/plan/build          (asks Wayfinder to plan + build funding txs)
+  ├─ /api/plan/balance        (asks Wayfinder for investable USD, for presets)
   ├─ /api/plan/execute-step
   └─ Privy server-wallet provisioning
 
@@ -23,29 +24,43 @@ Python sidecar
   └─ /api/wayfinder/execute
       ├─ protected by x-tilt-internal-secret
       ├─ wraps Privy wallet RPC as a Wayfinder signing callback
+      ├─ operation=fund mode=plan    → Wayfinder builds unsigned funding txs
+      ├─ operation=fund mode=balance → Wayfinder reports investable USD
       └─ runs Wayfinder strategy.deposit(...)
 ```
 
 ## Wallets
 
-- **Embedded wallet**: user-controlled Privy wallet. It holds the user's funds and signs funding transfers.
-- **Server wallet**: app-owned Privy wallet provisioned per user. It receives funds and is driven by Wayfinder through the Privy signing adapter.
+- **Embedded wallet**: user-controlled Privy wallet. It holds the user's funds and signs the Wayfinder-built funding transactions.
+- **Server wallet**: app-owned Privy wallet provisioned per user. Wayfinder delivers USDC to it, then drives it for strategy deposits through the Privy signing adapter.
 
 Known limitation: `lib/wallet-registry.ts` still stores `userId -> walletId` in-process. Replace it with KV/Postgres before real users.
 
 ## Execution Flow
 
-1. User connects with Privy.
+1. User connects with Privy and chooses a USD amount to invest (25/50/75/100%
+   presets are sized off the wallet's investable balance via
+   `POST /api/plan/balance`).
 2. User opens `EXECUTE_PLAN`.
 3. Client calls `POST /api/plan/build`.
-4. Server provisions or reuses the user's server wallet and builds a `Plan`.
+4. Server provisions or reuses the server wallet and asks the sidecar to
+   **plan + build the funding transactions** (`operation=fund, mode=plan`):
+   Wayfinder figures out how to move whatever the wallet holds into the
+   server wallet as USDC on Base, and returns the unsigned tx(s). The plan
+   carries them as `fund-N` steps. If Wayfinder is unavailable the plan
+   returns without funding txs and the modal blocks execution.
 5. If `plan.executable === false`, the modal shows preview-only steps and no execute button.
 6. If executable, the modal walks steps in order:
    - `fund-gas`: embedded wallet sends a small Base ETH gas float to the server wallet.
-   - `fund-usdc`: embedded wallet sends the strategy USDC amount to the server wallet.
-   - Each funding tx is receipt-polled before the next step starts.
+   - `fund-N`: embedded wallet signs each Wayfinder-built funding tx (swaps/
+     bridges that deliver USDC to the server wallet). Receipt-polled in turn.
    - `strategy-*`: Next.js calls the Python sidecar to run Wayfinder.
 7. Sidecar runs Wayfinder and returns `{ source: "live", txHashes, status }`.
+
+The funding route is wired but unverified: the Wayfinder swap/planner class
+(`FUND_SPEC` in `api/wayfinder/execute.py`) and its `build_funding_route` /
+`investable_value` methods are best-guesses pending the real SDK, same as the
+strategy specs. Verify before a live run.
 
 ## Sidecar Auth
 

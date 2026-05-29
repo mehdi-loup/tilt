@@ -70,6 +70,27 @@ PROFILE_STRATEGIES: dict[str, dict[str, Any]] = {
 }
 
 
+# ─── Funding (wallet holdings → USDC on Base, delivered to server wallet) ─
+#
+# Wayfinder plans + builds the route that turns whatever the wallet holds
+# into the target USDC on Base and delivers it to the server wallet,
+# bridging across chains as needed. Wayfinder owns route selection,
+# slippage, and bridge hops — we only pass the target + recipient and relay
+# the built transactions for the user's embedded wallet to sign.
+#
+# Class/module names are a best-guess pending the real wayfinder-paths swap
+# API — same convention as PROFILE_STRATEGIES above. Verify against the SDK
+# before trusting a live run.
+USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+FUND_SPEC: dict[str, Any] = {
+    "module": "wayfinder_paths.strategies.swap_strategy.strategy",  # TODO verify
+    "class_name": "SwapStrategy",  # TODO verify
+    "target_token": USDC_BASE,
+    "target_caip2": "eip155:8453",
+}
+
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 — required by BaseHTTPRequestHandler
         if not INTERNAL_SECRET:
@@ -97,6 +118,13 @@ class handler(BaseHTTPRequestHandler):
         if not user_jwt:
             self._respond(401, {"error": "missing user JWT"})
             return
+
+        # Funding is its own operation: Wayfinder plans + builds the txs that
+        # move whatever the wallet holds into the server wallet as USDC on Base.
+        if body.get("operation") == "fund":
+            self._handle_fund(body)
+            return
+
         if profile_id not in PROFILE_STRATEGIES:
             self._respond(400, {"error": f"unknown profileId: {profile_id}"})
             return
@@ -154,6 +182,61 @@ class handler(BaseHTTPRequestHandler):
             "profiles": list(PROFILE_STRATEGIES.keys()),
             "wayfinderInstalled": _wayfinder_installed(),
         })
+
+    def _handle_fund(self, body: dict) -> None:
+        """Plan funding, or report the wallet's investable balance.
+
+        mode="plan":    Wayfinder builds the tx(s) that move the wallet's
+                        holdings into the recipient (server) wallet as USDC
+                        on Base. Returns unsigned txs for the user to sign.
+        mode="balance": report the total investable USD Wayfinder sees, so
+                        the UI's 25/50/75/100% presets have a base.
+        """
+        mode = body.get("mode", "plan")
+        from_address = body.get("fromAddress")
+        recipient_address = body.get("recipientAddress")
+        target_units = body.get("targetUsdcUnits")
+        amount_usd = body.get("amountUsd")
+        target_caip2 = body.get("caip2", DEFAULT_CAIP2)
+
+        if not from_address:
+            self._respond(400, {"error": "fromAddress required"})
+            return
+        if mode == "plan" and not (recipient_address and target_units):
+            self._respond(400, {
+                "error": "recipientAddress and targetUsdcUnits required for plan",
+            })
+            return
+
+        runner = balance_fund if mode == "balance" else plan_fund
+        try:
+            result = asyncio.run(
+                runner(
+                    from_address=from_address,
+                    recipient_address=recipient_address,
+                    target_usdc_units=int(target_units) if target_units else 0,
+                    amount_usd=float(amount_usd) if amount_usd is not None else None,
+                    target_caip2=target_caip2,
+                )
+            )
+        except StrategyImportError as exc:
+            self._respond(503, {
+                "ok": False,
+                "source": "missing-dep",
+                "error": str(exc),
+                "hint": "Add wayfinder-paths to api/wayfinder/requirements.txt and redeploy.",
+            })
+            return
+        except Exception as exc:  # noqa: BLE001 — surface any Wayfinder failure
+            self._respond(502, {
+                "ok": False,
+                "source": "wayfinder-error",
+                "error": f"{type(exc).__name__}: {exc}",
+                "trace": traceback.format_exc(),
+            })
+            return
+
+        self._respond(200, {"ok": True, "source": "live", **result})
 
     def _user_jwt(self) -> str:
         auth = self.headers.get("authorization", "")
@@ -304,6 +387,93 @@ async def run_strategy(
     status = await strategy.deposit(main_token_amount=amount_usd)
     # `status` is a StatusTuple — convert to JSON-safe dict.
     return _serialize_status(status)
+
+
+# ─── Funding conversion ──────────────────────────────────────────────────
+
+
+def _make_fund_strategy(from_address: str) -> Any:
+    """Instantiate the Wayfinder swap/bridge planner for `from_address`.
+
+    Route-building and balance reads are non-signing, so unlike run_strategy
+    we don't attach a Privy callback here — the embedded wallet signs the
+    built txs client-side. TODO: confirm the planner constructor against the
+    SDK (strategy deposits take signing callbacks; route building shouldn't)."""
+    if not _wayfinder_installed():
+        raise StrategyImportError(
+            "wayfinder_paths is not installed in this Python runtime"
+        )
+    module = __import__(FUND_SPEC["module"], fromlist=[FUND_SPEC["class_name"]])
+    StrategyClass = getattr(module, FUND_SPEC["class_name"])
+    wallet_entry = {"address": from_address, "label": "tilt-user"}
+    return StrategyClass(
+        config={},
+        main_wallet=wallet_entry,
+        strategy_wallet=wallet_entry,
+    )
+
+
+async def plan_fund(
+    *,
+    from_address: str,
+    recipient_address: str,
+    target_usdc_units: int,
+    amount_usd: float | None,
+    target_caip2: str,
+) -> dict[str, Any]:
+    """Ask Wayfinder to build the transaction(s) that move the wallet's
+    holdings into `recipient_address` as USDC on Base. Returns unsigned txs
+    for the embedded wallet to sign."""
+    planner = _make_fund_strategy(from_address)
+    # TODO: confirm Wayfinder's route-build method name + signature.
+    route = await planner.build_funding_route(
+        from_address=from_address,
+        recipient=recipient_address,
+        target_token=FUND_SPEC["target_token"],
+        target_caip2=target_caip2,
+        target_amount=target_usdc_units,
+    )
+    return {"mode": "plan", "txs": _normalize_txs(route)}
+
+
+async def balance_fund(
+    *,
+    from_address: str,
+    recipient_address: str | None,
+    target_usdc_units: int,
+    amount_usd: float | None,
+    target_caip2: str,
+) -> dict[str, Any]:
+    """Report the total investable USD value Wayfinder sees in the wallet,
+    so the UI's 25/50/75/100% presets have a base."""
+    planner = _make_fund_strategy(from_address)
+    # TODO: confirm Wayfinder's balance/portfolio method name + signature.
+    value = await planner.investable_value(
+        from_address=from_address,
+        quote_token=FUND_SPEC["target_token"],
+        quote_caip2=target_caip2,
+    )
+    return {"mode": "balance", "investableUsd": float(value)}
+
+
+def _normalize_txs(route: Any) -> list[dict[str, Any]]:
+    """Coerce Wayfinder's built route into [{to, data, value, chainId, label}]
+    so the client can sign each leg with the embedded wallet."""
+    raw = route.get("transactions") if isinstance(route, dict) else route
+    out: list[dict[str, Any]] = []
+    for t in raw or []:
+        d = t if isinstance(t, dict) else getattr(t, "__dict__", {})
+        value = d.get("value", "0x0")
+        if isinstance(value, int):
+            value = hex(value)
+        out.append({
+            "to": d.get("to"),
+            "data": d.get("data", "0x"),
+            "value": value or "0x0",
+            "chainId": int(d.get("chainId") or d.get("chain_id") or 8453),
+            "label": d.get("label"),
+        })
+    return out
 
 
 def _serialize_status(status: Any) -> dict[str, Any]:
