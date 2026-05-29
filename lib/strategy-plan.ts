@@ -3,40 +3,43 @@
 // A Plan is a sequence of Steps that, when run in order, deploys the
 // user's chosen risk profile by handing off to Wayfinder strategies.
 //
-//   - `fund`     — user signs from their embedded wallet. Sends Base ETH
-//                  gas and USDC from embedded → server wallet.
+//   - `fund`     — user signs from their embedded wallet. The funding
+//                  transactions are PLANNED AND BUILT BY WAYFINDER: it
+//                  figures out how to move the user's holdings into the
+//                  server wallet as USDC on Base (swaps/bridges as needed).
+//                  We just relay the built calldata for the user to sign.
 //   - `strategy` — server dispatches to api/wayfinder/execute, which
 //                  drives a Wayfinder strategy against the user's Privy
 //                  server wallet. Multi-tx internally; reported as one
 //                  logical step.
 //
-// We intentionally do NOT generate per-asset routing here — that's
-// Wayfinder's job. lib/profile-strategies.ts declares which Wayfinder
-// strategy each profile invokes; this file just translates that into a
-// step list with the funding leg prepended.
+// We intentionally do NOT generate per-asset routing or swap calldata here
+// — that's Wayfinder's job. lib/profile-strategies.ts declares which
+// Wayfinder strategy each profile invokes; this file just translates that
+// into a step list with the Wayfinder-built funding legs prepended.
 
 import { profileFor, type RiskProfileId } from "./tilt";
-import { FUNDING_CHAIN_ID, TOKENS } from "./chains";
-import { buildErc20Transfer } from "./tx-builders";
+import { FUNDING_CHAIN_ID } from "./chains";
 import {
   PROFILE_COMPOSITION,
   isProfileExecutable,
   minimumAmountUsd,
   type StrategyInvocation,
 } from "./profile-strategies";
-import type { Hex } from "viem";
 
 export type PlanStepKind = "fund" | "strategy";
 export type Signer = "embedded" | "server";
 export type StepStatus = "live" | "stub";
 
-/** Pre-encoded tx for client-signed steps. Bytes generated server-side
- * so the client doesn't have to import viem. */
+/** Pre-encoded tx for client-signed steps. For funding legs these come
+ * straight from Wayfinder's route builder. */
 export interface ClientTx {
   to: string;
   data: string;
   value: string; // hex
   chainId: number;
+  /** Optional human label Wayfinder attaches to this leg. */
+  label?: string;
 }
 
 export interface PlanStep {
@@ -81,6 +84,11 @@ interface BuildArgs {
   amountUsd: number;
   embeddedWalletAddress: string;
   serverWalletAddress: string;
+  /** Wayfinder-planned funding transactions (the embedded wallet signs
+   * these) that move the user's holdings into the server wallet as USDC on
+   * Base. Absent during server-side re-derivation, where only strategy
+   * steps matter — those legs are emitted without a signable tx. */
+  fundingTxs?: ClientTx[];
 }
 
 export function buildPlan({
@@ -88,6 +96,7 @@ export function buildPlan({
   amountUsd,
   embeddedWalletAddress,
   serverWalletAddress,
+  fundingTxs,
 }: BuildArgs): Plan {
   const profile = profileFor(risk);
   const composition = PROFILE_COMPOSITION[profile.id];
@@ -98,6 +107,8 @@ export function buildPlan({
   const steps: PlanStep[] = [];
 
   if (executable) {
+    // Gas float so the server wallet can pay for the strategy deposit on
+    // Base after Wayfinder delivers USDC to it.
     steps.push({
       id: "fund-gas",
       kind: "fund",
@@ -116,29 +127,22 @@ export function buildPlan({
       },
     });
 
-    const fundTx = buildErc20Transfer(
-      TOKENS.USDC,
-      serverWalletAddress as Hex,
-      totalUnits,
-    );
-    steps.push({
-      id: "fund-usdc",
-      kind: "fund",
-      label: `Fund execution wallet · ${amountUsd} USDC`,
-      description: `Transfer ${amountUsd} USDC from your wallet to your execution wallet (${shortAddr(
-        serverWalletAddress,
-      )}).`,
-      signer: "embedded",
-      status: "live",
-      chainId: FUNDING_CHAIN_ID,
-      amountUnits: totalUnits.toString(),
-      amountUsd,
-      tx: {
-        to: fundTx.to,
-        data: fundTx.data,
-        value: "0x0",
-        chainId: FUNDING_CHAIN_ID,
-      },
+    // Wayfinder-planned funding legs: one signable step per built tx. These
+    // move whatever the user holds into the server wallet as USDC on Base.
+    (fundingTxs ?? []).forEach((tx, idx) => {
+      steps.push({
+        id: `fund-${idx}`,
+        kind: "fund",
+        label: tx.label ?? `Fund execution wallet · ${amountUsd} USDC`,
+        description: `Wayfinder-built transaction moving your funds into the execution wallet (${shortAddr(
+          serverWalletAddress,
+        )}) as USDC on Base. Wayfinder owns route selection, slippage, and any bridge hops.`,
+        signer: "embedded",
+        status: "live",
+        chainId: tx.chainId,
+        amountUsd,
+        tx,
+      });
     });
   }
 

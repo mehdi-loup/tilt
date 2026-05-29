@@ -5,3 +5,5 @@ out/
 .vercel
 *.tsbuildinfo
 .DS_Store
+
+certificates
