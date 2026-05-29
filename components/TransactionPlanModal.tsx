@@ -41,9 +41,11 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
   const { sendTransaction } = useSendTransaction();
 
   const embedded = wallets.find((w) => w.walletClientType === "privy");
-  const [amount, setAmount] = useState(250);
+  const [amount, setAmount] = useState(0);
+  const [investableUsd, setInvestableUsd] = useState<number | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [planErr, setPlanErr] = useState<string | null>(null);
+  const [quoteWarning, setQuoteWarning] = useState<string | null>(null);
   const [walletErr, setWalletErr] = useState<string | null>(null);
   const [building, setBuilding] = useState(false);
   const [creatingWallet, setCreatingWallet] = useState(false);
@@ -58,24 +60,53 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose, running]);
 
+  // Ask Wayfinder how much the wallet can invest, for the amount presets.
+  useEffect(() => {
+    if (!embedded || !authenticated) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const jwt = await getAccessToken();
+        const res = await fetch("/api/plan/balance", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+          body: JSON.stringify({ embeddedWalletAddress: embedded.address }),
+        });
+        const body = (await res.json().catch(() => ({}))) as { investableUsd?: number | null };
+        if (!cancelled) setInvestableUsd(body.investableUsd ?? null);
+      } catch {
+        if (!cancelled) setInvestableUsd(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [embedded, authenticated, getAccessToken]);
+
   const buildPlan = useCallback(async () => {
     if (!embedded || !authenticated) return;
     setBuilding(true);
     setPlanErr(null);
+    setQuoteWarning(null);
     setSteps({});
     try {
       const jwt = await getAccessToken();
       const res = await fetch("/api/plan/build", {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
-        body: JSON.stringify({ risk, amountUsd: amount, embeddedWalletAddress: embedded.address }),
+        body: JSON.stringify({
+          risk,
+          amountUsd: amount,
+          embeddedWalletAddress: embedded.address,
+        }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error ?? `HTTP ${res.status}`);
       }
-      const body = (await res.json()) as { plan: Plan };
+      const body = (await res.json()) as { plan: Plan; quoteError?: string };
       setPlan(body.plan);
+      setQuoteWarning(body.quoteError ?? null);
       const init: Record<string, StepState> = {};
       for (const s of body.plan.steps) init[s.id] = { status: "idle" };
       setSteps(init);
@@ -178,7 +209,27 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
       return st === "success" || st === "stub";
     });
   }, [plan, steps]);
-  const canExecute = !!plan && plan.executable && amount >= plan.minimumAmountUsd;
+
+  // Wayfinder builds the funding legs; they're ready once the plan carries
+  // at least one signable funding tx (id `fund-N`, distinct from fund-gas).
+  const fundReady = !!plan?.steps.some((s) => /^fund-\d+$/.test(s.id) && s.tx);
+  const overBalance = investableUsd !== null && amount > investableUsd;
+  const canExecute =
+    !!plan &&
+    plan.executable &&
+    amount >= plan.minimumAmountUsd &&
+    fundReady &&
+    !overBalance;
+
+  const blockMessage = !plan
+    ? ""
+    : !plan.executable
+      ? "PLAN PREVIEW ONLY · STRATEGY COMPOSITION NOT YET EXECUTABLE"
+      : !fundReady
+        ? `WAYFINDER FUNDING PLAN UNAVAILABLE${quoteWarning ? ` · ${quoteWarning.toUpperCase()}` : ""}`
+        : overBalance
+          ? `AMOUNT EXCEEDS INVESTABLE BALANCE ($${investableUsd?.toFixed(2)})`
+          : "PLAN PREVIEW ONLY · STRATEGY COMPOSITION NOT YET EXECUTABLE";
 
   if (!authenticated || !embedded) {
     const title = authenticated ? "CREATE EMBEDDED WALLET" : "CONNECT WALLET";
@@ -241,6 +292,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
             building={building}
             err={planErr}
             minAmount={MIN_EXECUTE_USD}
+            investableUsd={investableUsd}
           />
         )}
 
@@ -301,7 +353,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
                       textAlign: "center",
                     }}
                   >
-                    PLAN PREVIEW ONLY · STRATEGY COMPOSITION NOT YET EXECUTABLE
+                    {blockMessage}
                   </div>
                 )
               )}
@@ -329,7 +381,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
                   textAlign: "center",
                 }}
               >
-                {plan.executable ? "MAINNET BASE · USDC + ETH GAS · LIVE TRANSACTIONS" : "PREVIEW · NO FUNDS MOVE"}
+                {plan.executable ? "MAINNET BASE · ANY TOKEN → USDC VIA WAYFINDER · LIVE TRANSACTIONS" : "PREVIEW · NO FUNDS MOVE"}
               </div>
             </div>
           </>
@@ -429,6 +481,7 @@ function PlanIntake({
   building,
   err,
   minAmount,
+  investableUsd,
 }: {
   amount: number;
   onAmount: (v: number) => void;
@@ -436,24 +489,32 @@ function PlanIntake({
   building: boolean;
   err: string | null;
   minAmount: number;
+  investableUsd: number | null;
 }) {
+  const overBalance = investableUsd !== null && amount > investableUsd;
+  const disabled = building || amount < minAmount || overBalance;
   return (
     <div style={{ marginTop: 24 }}>
       <div
         style={{
-          fontFamily: C.mono,
-          fontSize: 11,
-          color: C.sub,
-          letterSpacing: 1,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "baseline",
           marginBottom: 8,
         }}
       >
-        AMOUNT (USDC, BASE)
+        <div style={{ fontFamily: C.mono, fontSize: 11, color: C.sub, letterSpacing: 1 }}>
+          AMOUNT TO INVEST
+        </div>
+        <div style={{ fontFamily: C.mono, fontSize: 11, color: C.sub, letterSpacing: 0.6 }}>
+          {investableUsd === null ? "BALANCE …" : `BALANCE $${investableUsd.toFixed(2)}`}
+        </div>
       </div>
       <input
         type="number"
         value={amount}
         min={minAmount}
+        max={investableUsd ?? undefined}
         onChange={(e) => onAmount(Math.max(0, Number(e.target.value) || 0))}
         style={{
           width: "100%",
@@ -468,11 +529,20 @@ function PlanIntake({
           outline: "none",
         }}
       />
-      <div style={{ display: "flex", gap: 8, marginTop: 8, marginBottom: 24 }}>
-        {[250, 500, 1000, 5000].map((v) => (
+      <div style={{ display: "flex", gap: 8, marginTop: 8, marginBottom: 16 }}>
+        {[
+          { label: "25%", frac: 0.25 },
+          { label: "50%", frac: 0.5 },
+          { label: "75%", frac: 0.75 },
+          { label: "100%", frac: 1 },
+        ].map((p) => (
           <button
-            key={v}
-            onClick={() => onAmount(v)}
+            key={p.label}
+            disabled={investableUsd === null || investableUsd <= 0}
+            onClick={() => {
+              if (investableUsd === null) return;
+              onAmount(Math.floor(investableUsd * p.frac * 100) / 100);
+            }}
             style={{
               flex: 1,
               background: "transparent",
@@ -482,13 +552,31 @@ function PlanIntake({
               fontFamily: C.mono,
               fontSize: 11,
               letterSpacing: 0.6,
-              cursor: "pointer",
+              cursor: investableUsd === null || investableUsd <= 0 ? "not-allowed" : "pointer",
             }}
           >
-            ${v.toLocaleString()}
+            {p.label}
           </button>
         ))}
       </div>
+      <div
+        style={{
+          fontFamily: C.mono,
+          fontSize: 11,
+          color: C.sub,
+          letterSpacing: 0.4,
+          lineHeight: 1.5,
+          marginBottom: 24,
+        }}
+      >
+        Wayfinder plans and builds the transactions to move your funds into the
+        execution wallet as USDC on Base — whatever you hold, however it routes.
+      </div>
+      {overBalance && (
+        <div style={{ color: C.warn, fontFamily: C.mono, fontSize: 11, marginBottom: 12 }}>
+          Amount exceeds your investable balance.
+        </div>
+      )}
       {err && (
         <div
           style={{
@@ -503,18 +591,18 @@ function PlanIntake({
       )}
       <button
         onClick={onBuild}
-        disabled={building || amount < minAmount}
+        disabled={disabled}
         style={{
           width: "100%",
-          background: building || amount < minAmount ? "transparent" : C.accent,
-          color: building || amount < minAmount ? C.sub : C.bg,
-          border: building || amount < minAmount ? `1px solid ${C.dim2}` : "none",
+          background: disabled ? "transparent" : C.accent,
+          color: disabled ? C.sub : C.bg,
+          border: disabled ? `1px solid ${C.dim2}` : "none",
           padding: "14px",
           fontSize: 13,
           fontWeight: 700,
           fontFamily: C.mono,
           letterSpacing: 1,
-          cursor: building || amount < minAmount ? "not-allowed" : "pointer",
+          cursor: disabled ? "not-allowed" : "pointer",
         }}
       >
         {building ? "BUILDING PLAN…" : "BUILD PLAN →"}
