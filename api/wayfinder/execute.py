@@ -100,13 +100,22 @@ MIN_SOURCE_USD = 0.50
 # final fixed-amount transfer to the server wallet still clears.
 SWAP_BUFFER = 1.01
 
-# Native value (in USD) we leave untouched per chain so the embedded wallet
-# can still pay gas for its own funding txs — and, on Base, the ~0.0005 ETH gas
-# float it sends to the server wallet (see GAS_FUNDING_WEI in strategy-plan.ts).
-# Subtracted from both the investable balance and the spendable amount when a
-# native token is a funding source. Ethereum L1 gas is dear, so it reserves more.
-NATIVE_GAS_RESERVE_USD: dict[int, float] = {1: 20.0, 8453: 3.0}
+BASE_CHAIN_ID = 8453  # funding target (target_caip2 is always eip155:8453)
+
+# Off-Base native value (USD) to keep for gas on a source chain, so we don't
+# swap away the ETH/etc. the embedded wallet needs to pay for its approve/swap
+# there. Ethereum L1 gas is dear, so it reserves more.
+NATIVE_GAS_RESERVE_USD: dict[int, float] = {1: 20.0}
 DEFAULT_NATIVE_RESERVE_USD = 1.50
+
+# Base ETH the embedded wallet must keep — and never swap. This is a *raw* wei
+# amount, not USD: the first plan step sends a fixed 0.0005 ETH gas float to the
+# server wallet (mirror GAS_FUNDING_WEI in lib/strategy-plan.ts), plus padding
+# for the wallet's own Base funding-tx gas. A USD threshold could under-provision
+# the fixed-size float if the ETH price rose or the valuation went stale.
+GAS_FLOAT_WEI = 500_000_000_000_000          # 0.0005 ETH
+BASE_GAS_PADDING_WEI = 300_000_000_000_000   # ~0.0003 ETH for the wallet's own txs
+BASE_GAS_RESERVE_WEI = GAS_FLOAT_WEI + BASE_GAS_PADDING_WEI
 
 # Chains we both route through and can confirm a receipt on. Must mirror
 # RPC_URLS in lib/chains.ts — we only fund from these so every leg is
@@ -443,17 +452,30 @@ def _bridgeable(b: dict[str, Any]) -> bool:
     )
 
 
+def _is_native(b: dict[str, Any]) -> bool:
+    return (b.get("address") or "").lower() in NATIVE_SENTINELS
+
+
 def _gas_min_usd(chain_id: int) -> float:
-    """USD of native gas the embedded wallet must hold on `chain_id` to pay for
-    its funding txs there (and, on Base, the ETH gas float)."""
+    """USD of native gas the embedded wallet must hold on a non-Base source
+    chain to pay for its approve/swap there."""
     return NATIVE_GAS_RESERVE_USD.get(chain_id, DEFAULT_NATIVE_RESERVE_USD)
 
 
 def _gas_reserve_usd(b: dict[str, Any]) -> float:
-    """USD of native value to keep for gas (0 for non-native tokens)."""
-    if (b.get("address") or "").lower() not in NATIVE_SENTINELS:
+    """USD of native value to keep for gas (0 for non-native tokens). On Base
+    the reserve is the raw float+padding valued via this holding, so it tracks
+    the fixed wei the float needs rather than a fixed dollar amount."""
+    if not _is_native(b):
         return 0.0
-    return _gas_min_usd(int(b.get("chain_id") or 0))
+    cid = int(b.get("chain_id") or 0)
+    if cid == BASE_CHAIN_ID:
+        amount_raw = int(b.get("amount") or 0)
+        value_usd = float(b.get("value_usd") or 0)
+        if amount_raw <= 0:
+            return value_usd
+        return min(value_usd, value_usd * BASE_GAS_RESERVE_WEI / amount_raw)
+    return _gas_min_usd(cid)
 
 
 def _spendable_usd(b: dict[str, Any]) -> float:
@@ -464,21 +486,35 @@ def _spendable_usd(b: dict[str, Any]) -> float:
 def _native_usd_by_chain(balances: list[dict[str, Any]]) -> dict[int, float]:
     out: dict[int, float] = {}
     for b in balances:
-        if (b.get("address") or "").lower() in NATIVE_SENTINELS:
+        if _is_native(b):
             cid = int(b.get("chain_id") or 0)
             out[cid] = out.get(cid, 0.0) + float(b.get("value_usd") or 0)
     return out
 
 
-def _usable_chain(b: dict[str, Any], native_usd_by_chain: dict[int, float]) -> bool:
+def _base_gas_ok(balances: list[dict[str, Any]]) -> bool:
+    """Does the embedded wallet hold enough raw Base ETH for the gas float plus
+    its own Base funding-tx gas? Gates the whole plan — without it the first
+    step (and every Base leg) can't pay gas."""
+    base_native_wei = sum(
+        int(b.get("amount") or 0)
+        for b in balances
+        if int(b.get("chain_id") or 0) == BASE_CHAIN_ID and _is_native(b)
+    )
+    return base_native_wei >= BASE_GAS_RESERVE_WEI
+
+
+def _usable_chain(
+    b: dict[str, Any], native_usd_by_chain: dict[int, float], base_gas_ok: bool
+) -> bool:
     """A holding we can actually fund from: bridgeable, on a monitorable chain,
     and on a chain where the wallet holds enough native gas to transact."""
     cid = int(b.get("chain_id") or 0)
-    return (
-        _bridgeable(b)
-        and cid in SUPPORTED_CHAINS
-        and native_usd_by_chain.get(cid, 0.0) >= _gas_min_usd(cid)
-    )
+    if not _bridgeable(b) or cid not in SUPPORTED_CHAINS:
+        return False
+    if cid == BASE_CHAIN_ID:
+        return base_gas_ok
+    return native_usd_by_chain.get(cid, 0.0) >= _gas_min_usd(cid)
 
 
 async def balance_fund(
@@ -494,9 +530,16 @@ async def balance_fund(
     where the wallet has native gas to transact, net of a per-chain gas
     reserve, so a 100% preset stays executable."""
     balances = await _enriched_balances(from_address)
+    base_gas_ok = _base_gas_ok(balances)
+    # No Base ETH for the gas float ⇒ nothing is deployable, so report nothing
+    # investable rather than a number the user can't actually act on.
+    if not base_gas_ok:
+        return {"mode": "balance", "investableUsd": 0.0}
     native_by_chain = _native_usd_by_chain(balances)
     total = sum(
-        _spendable_usd(b) for b in balances if _usable_chain(b, native_by_chain)
+        _spendable_usd(b)
+        for b in balances
+        if _usable_chain(b, native_by_chain, base_gas_ok)
     )
     return {"mode": "balance", "investableUsd": total}
 
@@ -523,11 +566,12 @@ async def plan_fund(
     target_chain = _caip2_chain_id(target_caip2)
     balances = await _enriched_balances(from_address)
     native_by_chain = _native_usd_by_chain(balances)
+    base_gas_ok = _base_gas_ok(balances)
 
-    # The first plan step sends an ETH gas float on Base and every funding leg
-    # costs Base gas, so without Base ETH nothing is executable — even a wallet
-    # that already holds enough USDC.
-    if native_by_chain.get(target_chain, 0.0) < _gas_min_usd(target_chain):
+    # The first plan step sends a fixed-size ETH gas float on Base and every
+    # funding leg costs Base gas, so without enough raw Base ETH nothing is
+    # executable — even a wallet that already holds enough USDC.
+    if not base_gas_ok:
         return {
             "mode": "plan",
             "txs": [],
@@ -545,7 +589,7 @@ async def plan_fund(
         (
             b
             for b in balances
-            if _usable_chain(b, native_by_chain)
+            if _usable_chain(b, native_by_chain, base_gas_ok)
             and not is_base_usdc(b)
             and _spendable_usd(b) >= MIN_SOURCE_USD
         ),
