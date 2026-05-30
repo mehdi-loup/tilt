@@ -4,9 +4,9 @@ How `EXECUTE_PLAN` deploys a strategy on-chain.
 
 ## Current Status
 
-Only **Stable Lender** is executable today. It dispatches the user's funded server wallet to Wayfinder's `stablecoin_yield_strategy` on Base.
+Only **Stable Lender** is fully executable today. It dispatches the user's funded server wallet to Wayfinder's `stablecoin_yield_strategy` on Base and now runs the required `deposit()` + `update()` lifecycle before reporting success.
 
-The other four profiles are **preview-only**. They render planned Wayfinder strategy steps with `STUB` badges and `pendingNote` text, but the modal does not show `SIGN & EXECUTE` and does not create any funding transfer for those profiles.
+Base-only strategy steps are wired for `stablecoin_yield_strategy` and `moonwell_wsteth_loop_strategy`. The other four profiles are still **preview-only as complete profiles** because at least one strategy in each profile needs target-chain USDC/gas funding that the current Base-only funding flow does not provide. The modal does not show `SIGN & EXECUTE` and does not create funding transfers for those incomplete profiles.
 
 ## Architecture
 
@@ -26,7 +26,7 @@ Python sidecar
       ├─ wraps Privy wallet RPC as a Wayfinder signing callback
       ├─ operation=fund mode=plan    → Wayfinder builds unsigned funding txs
       ├─ operation=fund mode=balance → Wayfinder reports investable USD
-      └─ runs Wayfinder strategy.deposit(...)
+      └─ runs Wayfinder strategy.deposit(...) and update(...) when required
 ```
 
 ## Wallets
@@ -54,13 +54,10 @@ Known limitation: `lib/wallet-registry.ts` still stores `userId -> walletId` in-
    - `fund-gas`: embedded wallet sends a small Base ETH gas float to the server wallet.
    - `fund-N`: embedded wallet signs each Wayfinder-built funding tx (swaps/
      bridges that deliver USDC to the server wallet). Receipt-polled in turn.
-   - `strategy-*`: Next.js calls the Python sidecar to run Wayfinder.
+   - `strategy-*`: Next.js calls the Python sidecar with the concrete `strategyName` to run Wayfinder.
 7. Sidecar runs Wayfinder and returns `{ source: "live", txHashes, status }`.
 
-The funding route is wired but unverified: the Wayfinder swap/planner class
-(`FUND_SPEC` in `api/wayfinder/execute.py`) and its `build_funding_route` /
-`investable_value` methods are best-guesses pending the real SDK, same as the
-strategy specs. Verify before a live run.
+The Stable Lender strategy was validated against the real `wayfinder-paths` SDK: `deposit()` only moves funds into the strategy wallet, and `update()` is the step that deploys to the selected pool. A live on-chain run still requires funded Privy wallets and production secrets.
 
 ## Sidecar Auth
 
@@ -101,10 +98,10 @@ Wayfinder receives that callback through `main_wallet_signing_callback` and `str
 | Profile | Status |
 | --- | --- |
 | Stable Lender | **LIVE**: Base `stablecoin_yield_strategy`, minimum `$2` |
-| Conservative Yield | Preview-only: needs composition runner + Base -> HyperEVM bridge |
-| Balanced DeFi | Preview-only: needs composition runner + bridges |
-| Aggressive Growth | Preview-only: needs Hyperliquid/HyperEVM bridges |
-| Max Speculation | Preview-only: needs multi-chain composition |
+| Conservative Yield | Preview-only: `stablecoin_yield_strategy` wired; `multi_vault_split_strategy` needs target-chain funding |
+| Balanced DeFi | Preview-only: Base `stablecoin_yield_strategy` + `moonwell_wsteth_loop_strategy` wired; `multi_vault_split_strategy` needs target-chain funding |
+| Aggressive Growth | Preview-only: Base `moonwell_wsteth_loop_strategy` wired; `basis_trading_strategy` + `projectx_thbill_usdc_strategy` need target-chain funding |
+| Max Speculation | Preview-only: Base `moonwell_wsteth_loop_strategy` wired; `basis_trading_strategy` + `boros_hype_strategy` need multi-chain funding |
 
 ## Environment
 
@@ -120,7 +117,7 @@ Privy dashboard requirement: server wallet creation must be enabled for the app 
 
 1. **Deploy-test Stable Lender**
    - Confirm Vercel Python installs `wayfinder-paths`.
-   - Confirm the real Wayfinder strategy constructor and callback contract match the adapter.
+   - Confirm the Privy callback signs the real `deposit()` and `update()` transactions end-to-end.
    - Test with risk `0-20`, amount `>= $2`, and embedded wallet holding Base USDC + Base ETH.
 
 2. **Persist server wallets**
@@ -134,15 +131,14 @@ Privy dashboard requirement: server wallet creation must be enabled for the app 
    - Add a way to withdraw idle USDC/ETH from the server wallet.
 
 5. **Profiles 2-5**
-   - Add bridge steps.
-   - Add sidecar composition runner.
+   - Add target-chain funding/bridge steps for Arbitrum, HyperEVM, and Hyperliquid.
    - Split amounts per strategy and reconcile status/receipts.
 
 ## Local Checks
 
 ```bash
 pnpm build
-env PYTHONPYCACHEPREFIX=/private/tmp/tilt-pycache python3 -m py_compile api/wayfinder/execute.py
+python3.12 -m py_compile api/wayfinder/execute.py
 ```
 
 `pnpm lint` currently prompts for Next.js ESLint setup and is not non-interactive yet.

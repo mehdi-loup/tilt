@@ -9,6 +9,8 @@ import "server-only";
 export interface WayfinderResult {
   ok?: boolean;
   source?: "live" | "stub" | "missing-dep" | "wayfinder-error" | "error";
+  success?: boolean;
+  strategyName?: string;
   txHashes?: string[];
   note?: string;
   error?: string;

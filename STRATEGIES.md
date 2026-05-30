@@ -2,7 +2,7 @@
 
 Source of truth: [`lib/profile-strategies.ts`](./lib/profile-strategies.ts) (TS mirror) and [`api/wayfinder/execute.py`](./api/wayfinder/execute.py) (Python dispatch).
 
-Strategies are **not implemented in this repo.** They live in [WayfinderFoundation/wayfinder-paths-sdk](https://github.com/WayfinderFoundation/wayfinder-paths-sdk). Each profile invokes one (eventually a composition of) Wayfinder strategy classes. Wayfinder handles pool selection, slippage, rebalancing, and multi-tx routing internally — we just pick which strategy.
+Strategies are **not implemented in this repo.** They live in [WayfinderFoundation/wayfinder-paths-sdk](https://github.com/WayfinderFoundation/wayfinder-paths-sdk). Each profile invokes one or more Wayfinder strategy classes. Wayfinder handles pool selection, slippage, rebalancing, and multi-tx routing internally — we pick which strategy and run the strategy lifecycle.
 
 The dial maps a 0–100 risk score to one of five discrete profiles.
 
@@ -11,10 +11,10 @@ The dial maps a 0–100 risk score to one of five discrete profiles.
 | Risk band | Profile | Wayfinder strategies | Chain(s) | Status |
 | --- | --- | --- | --- | ---: |
 | 0–20 | Stable Lender | `stablecoin_yield_strategy` | Base | **LIVE** |
-| 21–40 | Conservative Yield | `stablecoin_yield_strategy` + `multi_vault_split_strategy` | Base + HyperEVM | STUB |
-| 41–60 | Balanced DeFi | `stablecoin_yield` + `moonwell_wsteth_loop` + `multi_vault_split` | Base + HyperEVM | STUB |
-| 61–80 | Aggressive Growth | `moonwell_wsteth_loop` + `basis_trading` + `projectx_thbill_usdc` | Base + Hyperliquid + HyperEVM | STUB |
-| 81–100 | Max Speculation | `moonwell_wsteth_loop` + `basis_trading` + `boros_hype` | Multi-chain | STUB |
+| 21–40 | Conservative Yield | `stablecoin_yield_strategy` + `multi_vault_split_strategy` | Base + HyperEVM | PREVIEW |
+| 41–60 | Balanced DeFi | `stablecoin_yield_strategy` + `moonwell_wsteth_loop_strategy` + `multi_vault_split_strategy` | Base + HyperEVM | PREVIEW |
+| 61–80 | Aggressive Growth | `moonwell_wsteth_loop_strategy` + `basis_trading_strategy` + `projectx_thbill_usdc_strategy` | Base + Hyperliquid + HyperEVM | PREVIEW |
+| 81–100 | Max Speculation | `moonwell_wsteth_loop_strategy` + `basis_trading_strategy` + `boros_hype_strategy` | Multi-chain | PREVIEW |
 
 ## What Wayfinder strategies do
 
@@ -28,14 +28,14 @@ The dial maps a 0–100 risk score to one of five discrete profiles.
 | `boros_hype_strategy` | Multi-chain | HYPE yield via Boros with Hyperliquid hedging. |
 | `hyperlend_stable_yield_strategy` | HyperEVM | Stablecoin lending allocator on HyperLend (currently unused — overlaps with `multi_vault_split`). |
 
-## What "STUB" means for the 4 non-Stable profiles
+## What "PREVIEW" means for the 4 non-Stable profiles
 
-Wayfinder's strategies are **chain-pinned**. Most of them live on HyperEVM or Hyperliquid, but our funding currency lands on Base. To activate Conservative Yield → Max Speculation we need two pieces of plumbing **not yet built**:
+Wayfinder's strategies are **chain-pinned**. Stablecoin Yield and Moonwell wstETH Loop are wired on Base. Most of the remaining strategies expect USDC and native gas on Arbitrum, HyperEVM, or Hyperliquid, but our funding flow currently lands on Base. To activate Conservative Yield → Max Speculation as complete executable profiles we need target-chain funding **not yet built**:
 
-1. **Cross-chain bridging** — USDC has to move from Base to HyperEVM/Hyperliquid before those strategies can deposit. Candidate routes: Circle's native CCTP, Across, deBridge. Each adds ~1–15 minutes of finality.
-2. **Composition runner** — When a profile invokes multiple strategies (e.g., 70% `stablecoin_yield` + 30% `multi_vault_split`), the sidecar needs to split the amount, dispatch each strategy in parallel or sequence, and reconcile results into one combined status.
+1. **Target-chain funding** — USDC and native gas have to move from Base to the strategy's required chain before those strategies can deposit. Candidate routes: Circle's native CCTP, Across, deBridge, or Wayfinder BRAP routes where they support the exact target.
+2. **Profile-level reconciliation** — When a profile invokes multiple strategies, the UI and sidecar need to reconcile partial failures, receipts, and recovery paths into one combined status.
 
-`lib/profile-strategies.ts` already declares the intended compositions with `status: "stub"` and a per-entry `pendingNote` explaining what's missing. The Plan UI surfaces these honestly with `STUB` badges.
+`lib/profile-strategies.ts` marks Base-only steps as `live` and target-chain steps as `stub` with a per-entry `pendingNote` explaining what's missing. The Plan UI surfaces incomplete profiles as preview-only.
 
 ## Verifying coverage
 

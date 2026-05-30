@@ -1,6 +1,6 @@
 // Profile → Wayfinder-strategy mapping (TS mirror of the Python side).
 //
-// Each profile invokes one (later: a composition of) Wayfinder strategy.
+// Each profile invokes one or more Wayfinder strategies.
 // Wayfinder is the source of truth for the actual deposit logic, slippage,
 // pool selection, etc. — we just declare which strategy and how much.
 
@@ -44,9 +44,7 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         label: "Stablecoin Yield · Base USDC",
         chain: "base",
         minAmountUsd: 2,
-        status: "stub",
-        pendingNote:
-          "Needs allocation split (e.g. 70/30) — composition runner not yet built.",
+        status: "live",
       },
       {
         strategyName: "multi_vault_split_strategy",
@@ -54,7 +52,7 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         chain: "hyperEVM",
         minAmountUsd: 10,
         status: "stub",
-        pendingNote: "Needs Base → HyperEVM bridge before deposit.",
+        pendingNote: "Needs target-chain USDC/gas funding before deposit.",
       },
     ],
   },
@@ -65,16 +63,14 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         label: "Stablecoin Yield · Base USDC",
         chain: "base",
         minAmountUsd: 2,
-        status: "stub",
-        pendingNote: "Awaiting composition runner.",
+        status: "live",
       },
       {
         strategyName: "moonwell_wsteth_loop_strategy",
         label: "Moonwell wstETH Loop · Base",
         chain: "base",
         minAmountUsd: 10,
-        status: "stub",
-        pendingNote: "Strategy class exists; composition runner needed.",
+        status: "live",
       },
       {
         strategyName: "multi_vault_split_strategy",
@@ -82,7 +78,7 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         chain: "hyperEVM",
         minAmountUsd: 10,
         status: "stub",
-        pendingNote: "Needs Base → HyperEVM bridge.",
+        pendingNote: "Needs target-chain USDC/gas funding before deposit.",
       },
     ],
   },
@@ -93,8 +89,7 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         label: "Moonwell wstETH Loop · Base",
         chain: "base",
         minAmountUsd: 10,
-        status: "stub",
-        pendingNote: "Awaiting composition runner.",
+        status: "live",
       },
       {
         strategyName: "basis_trading_strategy",
@@ -102,7 +97,7 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         chain: "hyperliquid",
         minAmountUsd: 25,
         status: "stub",
-        pendingNote: "Needs bridge to Hyperliquid + funding-rate trigger.",
+        pendingNote: "Needs Arbitrum/Hyperliquid funding before deposit.",
       },
       {
         strategyName: "projectx_thbill_usdc_strategy",
@@ -110,7 +105,7 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         chain: "hyperEVM",
         minAmountUsd: 25,
         status: "stub",
-        pendingNote: "Needs bridge to HyperEVM.",
+        pendingNote: "Needs HyperEVM USDC/gas funding before deposit.",
       },
     ],
   },
@@ -121,8 +116,7 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         label: "Moonwell wstETH Loop · Base",
         chain: "base",
         minAmountUsd: 10,
-        status: "stub",
-        pendingNote: "Awaiting composition runner.",
+        status: "live",
       },
       {
         strategyName: "basis_trading_strategy",
@@ -130,7 +124,7 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         chain: "hyperliquid",
         minAmountUsd: 25,
         status: "stub",
-        pendingNote: "Needs bridge + funding-rate trigger.",
+        pendingNote: "Needs Arbitrum/Hyperliquid funding before deposit.",
       },
       {
         strategyName: "boros_hype_strategy",
@@ -138,7 +132,7 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         chain: "multi",
         minAmountUsd: 50,
         status: "stub",
-        pendingNote: "Needs multi-chain bridge orchestration.",
+        pendingNote: "Needs multi-chain USDC/gas funding before deposit.",
       },
     ],
   },

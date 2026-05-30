@@ -79,6 +79,7 @@ export async function POST(req: Request) {
   const origin = new URL(req.url).origin;
   const { ok, status, payload } = await callWayfinder(origin, user.jwt, {
     profileId: plan.profileId,
+    strategyName: step.strategyName,
     amountUsd: step.amountUsd,
     walletId: wallet.walletId,
     walletAddress: wallet.address,

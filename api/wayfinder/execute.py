@@ -9,6 +9,7 @@ private key.
 Request body (POST /api/wayfinder/execute):
     {
       "profileId": "stable_lender",
+      "strategyName": "stablecoin_yield_strategy",
       "amountUsd": 100,
       "walletId":  "<privy-wallet-id>",
       "walletAddress": "0x...",
@@ -42,30 +43,49 @@ INTERNAL_SECRET = os.environ.get("WAYFINDER_INTERNAL_SECRET") or PRIVY_APP_SECRE
 DEFAULT_CAIP2 = "eip155:8453"  # Base mainnet
 
 
-# ─── Profile → Wayfinder strategy mapping ────────────────────────────────
+# ─── Profile/step → Wayfinder strategy mapping ─────────────────────────────
 #
-# Wayfinder ships 7 strategies. We map our 5 risk profiles to one (or in
-# the future, a composition of) them. For this turn only `stable_lender`
-# is fully wired — see EXECUTION.md for the remaining work.
-PROFILE_STRATEGIES: dict[str, dict[str, Any]] = {
-    "stable_lender": {
+# Wayfinder ships several strategies. The TypeScript planner sends the
+# concrete `strategyName` for each executable step; `PROFILE_STRATEGIES` keeps
+# backward compatibility for the single-step stable_lender profile and returns
+# honest stub notes for profiles that still need target-chain funding.
+STRATEGY_SPECS: dict[str, dict[str, Any]] = {
+    "stablecoin_yield_strategy": {
         "module": "wayfinder_paths.strategies.stablecoin_yield_strategy.strategy",
         "class_name": "StablecoinYieldStrategy",
         "chain": "base",
         "caip2": "eip155:8453",
         "min_amount_usd": 2.0,
+        # deposit() only stages funds into the strategy wallet; update()
+        # actually rotates into the selected yield pool.
+        "run_update_after_deposit": True,
+    },
+    "moonwell_wsteth_loop_strategy": {
+        "module": "wayfinder_paths.strategies.moonwell_wsteth_loop_strategy.strategy",
+        "class_name": "MoonwellWstethLoopStrategy",
+        "chain": "base",
+        "caip2": "eip155:8453",
+        "min_amount_usd": 10.0,
+        # deposit() stages Base USDC/ETH; update() deploys to Moonwell.
+        "run_update_after_deposit": True,
+    },
+}
+
+PROFILE_STRATEGIES: dict[str, dict[str, Any]] = {
+    "stable_lender": {
+        "strategy_name": "stablecoin_yield_strategy",
     },
     "conservative_yield": {
-        "todo": "Compose stablecoin_yield + multi_vault_split (needs HyperEVM bridge)",
+        "todo": "Needs Base + target-chain composition; multi_vault_split requires Arbitrum/HyperEVM funding.",
     },
     "balanced_defi": {
-        "todo": "Compose stablecoin_yield + moonwell_wsteth_loop (Base) + multi_vault_split (bridge needed)",
+        "todo": "Base strategies are wired, but the full profile still needs target-chain funding for multi_vault_split.",
     },
     "aggressive_growth": {
-        "todo": "Compose moonwell_wsteth_loop + basis_trading + projectx_thbill_usdc (multi-chain)",
+        "todo": "Moonwell is wired; basis_trading/projectx need Arbitrum/HyperEVM/Hyperliquid prefunding.",
     },
     "max_speculation": {
-        "todo": "Compose moonwell_wsteth_loop + basis_trading + boros_hype (multi-chain)",
+        "todo": "Moonwell is wired; basis_trading/boros need multi-chain prefunding and orchestration.",
     },
 }
 
@@ -141,6 +161,7 @@ class handler(BaseHTTPRequestHandler):
             return
 
         profile_id = body.get("profileId")
+        strategy_name = body.get("strategyName")
         amount_usd = body.get("amountUsd")
         wallet_id = body.get("walletId")
         wallet_address = body.get("walletAddress")
@@ -164,22 +185,34 @@ class handler(BaseHTTPRequestHandler):
             self._respond(400, {"error": "walletId, walletAddress, amountUsd required"})
             return
 
-        spec = PROFILE_STRATEGIES[profile_id]
-        if "todo" in spec:
+        profile_spec = PROFILE_STRATEGIES[profile_id]
+        if strategy_name:
+            spec = STRATEGY_SPECS.get(strategy_name)
+            if spec is None:
+                self._respond(400, {"error": f"unknown strategyName: {strategy_name}"})
+                return
+        elif "strategy_name" in profile_spec:
+            strategy_name = profile_spec["strategy_name"]
+            spec = STRATEGY_SPECS[strategy_name]
+        elif "todo" in profile_spec:
             # Profile recognised but Wayfinder composition not yet wired.
             self._respond(200, {
                 "ok": True,
                 "source": "stub",
                 "profileId": profile_id,
-                "note": spec["todo"],
+                "note": profile_spec["todo"],
                 "txHashes": [],
             })
+            return
+        else:
+            self._respond(400, {"error": f"profile {profile_id} has no strategy mapping"})
             return
 
         # ─── Drive Wayfinder ─────────────────────────────────────────
         try:
             result = asyncio.run(
                 run_strategy(
+                    strategy_name=strategy_name,
                     spec=spec,
                     amount_usd=float(amount_usd),
                     wallet_id=wallet_id,
@@ -203,6 +236,10 @@ class handler(BaseHTTPRequestHandler):
                 "error": f"{type(exc).__name__}: {exc}",
                 "trace": traceback.format_exc(),
             })
+            return
+
+        if not result.get("success", False):
+            self._respond(502, {"ok": False, "source": "wayfinder-error", **result})
             return
 
         self._respond(200, {"ok": True, "source": "live", **result})
@@ -379,14 +416,15 @@ def _prepare_tx_for_privy(tx: dict) -> dict:
 
 async def run_strategy(
     *,
+    strategy_name: str,
     spec: dict[str, Any],
     amount_usd: float,
     wallet_id: str,
     wallet_address: str,
     caip2: str,
 ) -> dict[str, Any]:
-    """Instantiate a Wayfinder strategy with our Privy-backed signer and
-    call deposit(amount)."""
+    """Instantiate a Wayfinder strategy with our Privy-backed signer and run
+    the full deposit lifecycle needed for deployed funds."""
     if not _wayfinder_installed():
         raise StrategyImportError(
             "wayfinder_paths is not installed in this Python runtime"
@@ -399,6 +437,9 @@ async def run_strategy(
         raise ValueError(
             f"amount {amount_usd} below {class_name} minimum {min_amount}"
         )
+    expected_caip2 = spec.get("caip2")
+    if expected_caip2 and caip2 != expected_caip2:
+        raise ValueError(f"{class_name} requires {expected_caip2}, got {caip2}")
 
     # Dynamic import keeps the function importable even when Wayfinder
     # isn't installed (the GET handler reports it).
@@ -416,9 +457,39 @@ async def run_strategy(
         strategy_wallet_signing_callback=sign_callback,
     )
 
-    status = await strategy.deposit(main_token_amount=amount_usd)
-    # `status` is a StatusTuple — convert to JSON-safe dict.
-    return _serialize_status(status)
+    lifecycle: dict[str, Any] = {
+        "deposit": _serialize_status(
+            await strategy.deposit(main_token_amount=amount_usd)
+        )
+    }
+    deposit_ok, deposit_message = _status_ok_message(lifecycle["deposit"])
+    if not deposit_ok:
+        return {
+            "success": False,
+            "strategyName": strategy_name,
+            "error": f"deposit failed: {deposit_message}",
+            "status": lifecycle,
+            "txHashes": [],
+        }
+
+    if spec.get("run_update_after_deposit"):
+        lifecycle["update"] = _serialize_status(await strategy.update())
+        update_ok, update_message = _status_ok_message(lifecycle["update"])
+        if not update_ok:
+            return {
+                "success": False,
+                "strategyName": strategy_name,
+                "error": f"update failed: {update_message}",
+                "status": lifecycle,
+                "txHashes": [],
+            }
+
+    return {
+        "success": True,
+        "strategyName": strategy_name,
+        "status": lifecycle,
+        "txHashes": [],
+    }
 
 
 # ─── Funding conversion ──────────────────────────────────────────────────
@@ -743,6 +814,19 @@ def _serialize_status(status: Any) -> dict[str, Any]:
     if hasattr(status, "_asdict"):
         return {"status": _jsonable(status._asdict())}
     return {"status": _jsonable(status)}
+
+
+def _status_ok_message(serialized: dict[str, Any]) -> tuple[bool, str]:
+    """Extract the bool/message convention used by Wayfinder StatusTuple."""
+    status = serialized.get("status")
+    if isinstance(status, list) and status and isinstance(status[0], bool):
+        message = str(status[1]) if len(status) > 1 else ""
+        return status[0], message
+    if isinstance(status, dict) and isinstance(status.get("success"), bool):
+        return bool(status["success"]), str(status.get("message") or "")
+    if isinstance(status, dict) and isinstance(status.get("ok"), bool):
+        return bool(status["ok"]), str(status.get("message") or "")
+    return True, str(status)
 
 
 def _jsonable(v: Any) -> Any:
