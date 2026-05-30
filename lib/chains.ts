@@ -27,6 +27,22 @@ export const RPC_URLS: Record<number, string> = {
   43114: "https://api.avax.network/ext/bc/C/rpc",
 };
 
+/** Block explorers for the funding chains, for tx links. */
+export const EXPLORERS: Record<number, string> = {
+  1: "https://etherscan.io",
+  10: "https://optimistic.etherscan.io",
+  56: "https://bscscan.com",
+  137: "https://polygonscan.com",
+  5000: "https://explorer.mantle.xyz",
+  8453: "https://basescan.org",
+  42161: "https://arbiscan.io",
+  43114: "https://snowtrace.io",
+};
+
+export function explorerTxUrl(chainId: number, hash: string): string {
+  return `${EXPLORERS[chainId] ?? EXPLORERS[FUNDING_CHAIN_ID]}/tx/${hash}`;
+}
+
 export const TOKENS = {
   USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Hex,
 } as const;

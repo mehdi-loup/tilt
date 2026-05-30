@@ -108,6 +108,11 @@ SWAP_BUFFER = 1.01
 NATIVE_GAS_RESERVE_USD: dict[int, float] = {1: 20.0, 8453: 3.0}
 DEFAULT_NATIVE_RESERVE_USD = 1.50
 
+# Chains we both route through and can confirm a receipt on. Must mirror
+# RPC_URLS in lib/chains.ts — we only fund from these so every leg is
+# verifiable client-side rather than optimistically assumed mined.
+SUPPORTED_CHAINS = {1, 10, 56, 137, 5000, 8453, 42161, 43114}
+
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 — required by BaseHTTPRequestHandler
@@ -438,18 +443,42 @@ def _bridgeable(b: dict[str, Any]) -> bool:
     )
 
 
+def _gas_min_usd(chain_id: int) -> float:
+    """USD of native gas the embedded wallet must hold on `chain_id` to pay for
+    its funding txs there (and, on Base, the ETH gas float)."""
+    return NATIVE_GAS_RESERVE_USD.get(chain_id, DEFAULT_NATIVE_RESERVE_USD)
+
+
 def _gas_reserve_usd(b: dict[str, Any]) -> float:
     """USD of native value to keep for gas (0 for non-native tokens)."""
     if (b.get("address") or "").lower() not in NATIVE_SENTINELS:
         return 0.0
-    return NATIVE_GAS_RESERVE_USD.get(
-        int(b.get("chain_id") or 0), DEFAULT_NATIVE_RESERVE_USD
-    )
+    return _gas_min_usd(int(b.get("chain_id") or 0))
 
 
 def _spendable_usd(b: dict[str, Any]) -> float:
     """Holding's USD value minus any native gas reserve."""
     return max(0.0, float(b.get("value_usd") or 0) - _gas_reserve_usd(b))
+
+
+def _native_usd_by_chain(balances: list[dict[str, Any]]) -> dict[int, float]:
+    out: dict[int, float] = {}
+    for b in balances:
+        if (b.get("address") or "").lower() in NATIVE_SENTINELS:
+            cid = int(b.get("chain_id") or 0)
+            out[cid] = out.get(cid, 0.0) + float(b.get("value_usd") or 0)
+    return out
+
+
+def _usable_chain(b: dict[str, Any], native_usd_by_chain: dict[int, float]) -> bool:
+    """A holding we can actually fund from: bridgeable, on a monitorable chain,
+    and on a chain where the wallet holds enough native gas to transact."""
+    cid = int(b.get("chain_id") or 0)
+    return (
+        _bridgeable(b)
+        and cid in SUPPORTED_CHAINS
+        and native_usd_by_chain.get(cid, 0.0) >= _gas_min_usd(cid)
+    )
 
 
 async def balance_fund(
@@ -460,12 +489,15 @@ async def balance_fund(
     amount_usd: float | None,
     target_caip2: str,
 ) -> dict[str, Any]:
-    """Total investable USD across all bridgeable chains — the base for the
-    UI's 25/50/75/100% presets. Funding bridges these to USDC on Base. Native
-    holdings are reported net of a per-chain gas reserve so a 100% preset
-    stays executable."""
+    """Total investable USD across all funding-eligible chains — the base for
+    the UI's 25/50/75/100% presets. Counts only holdings on monitorable chains
+    where the wallet has native gas to transact, net of a per-chain gas
+    reserve, so a 100% preset stays executable."""
     balances = await _enriched_balances(from_address)
-    total = sum(_spendable_usd(b) for b in balances if _bridgeable(b))
+    native_by_chain = _native_usd_by_chain(balances)
+    total = sum(
+        _spendable_usd(b) for b in balances if _usable_chain(b, native_by_chain)
+    )
     return {"mode": "balance", "investableUsd": total}
 
 
@@ -490,6 +522,17 @@ async def plan_fund(
 
     target_chain = _caip2_chain_id(target_caip2)
     balances = await _enriched_balances(from_address)
+    native_by_chain = _native_usd_by_chain(balances)
+
+    # The first plan step sends an ETH gas float on Base and every funding leg
+    # costs Base gas, so without Base ETH nothing is executable — even a wallet
+    # that already holds enough USDC.
+    if native_by_chain.get(target_chain, 0.0) < _gas_min_usd(target_chain):
+        return {
+            "mode": "plan",
+            "txs": [],
+            "error": "embedded wallet needs Base ETH to pay gas",
+        }
 
     def is_base_usdc(b: dict[str, Any]) -> bool:
         return (
@@ -502,7 +545,7 @@ async def plan_fund(
         (
             b
             for b in balances
-            if _bridgeable(b)
+            if _usable_chain(b, native_by_chain)
             and not is_base_usdc(b)
             and _spendable_usd(b) >= MIN_SOURCE_USD
         ),

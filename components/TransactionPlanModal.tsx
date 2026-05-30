@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useCreateWallet, usePrivy, useSendTransaction, useWallets } from "@privy-io/react-auth";
 import type { Plan, PlanStep } from "@/lib/strategy-plan";
-import { RPC_URLS, TOKENS, FUNDING_CHAIN_ID } from "@/lib/chains";
+import { RPC_URLS, TOKENS, FUNDING_CHAIN_ID, explorerTxUrl } from "@/lib/chains";
 
 const C = {
   bg: "#0b0d10",
@@ -703,7 +703,7 @@ function StepRow({
           {state.txHashes.map((h) => (
             <a
               key={h}
-              href={`https://basescan.org/tx/${h}`}
+              href={explorerTxUrl(step.chainId, h)}
               target="_blank"
               rel="noopener noreferrer"
               style={{
@@ -801,10 +801,10 @@ async function rpcCall(
 
 async function waitForReceipt(hash: string, chainId: number): Promise<void> {
   if (!RPC_URLS[chainId]) {
-    // No read RPC for this chain — proceed optimistically. For cross-chain
-    // funding the Base USDC settlement gate backstops the final transfer.
-    await sleep(4000);
-    return;
+    // Can't confirm a tx we can't read — fail loudly rather than mark an
+    // unmined (or reverted) tx successful. The sidecar only routes funding
+    // through SUPPORTED_CHAINS, so this is a defensive guard.
+    throw new Error(`no receipt RPC configured for chain ${chainId}`);
   }
   for (let attempt = 0; attempt < 90; attempt++) {
     const receipt = (await rpcCall(chainId, "eth_getTransactionReceipt", [hash])) as
