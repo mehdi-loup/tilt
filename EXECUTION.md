@@ -51,13 +51,13 @@ Known limitation: `lib/wallet-registry.ts` still stores `userId -> walletId` in-
    returns without funding txs and the modal blocks execution.
 5. If `plan.executable === false`, the modal shows preview-only steps and no execute button.
 6. If executable, the modal walks steps in order:
-   - `fund-gas`: embedded wallet sends a small Base ETH gas float to the server wallet.
+   - `fund-gas`: embedded wallet sends a `0.001` Base ETH gas float to the server wallet.
    - `fund-N`: embedded wallet signs each Wayfinder-built funding tx (swaps/
      bridges that deliver USDC to the server wallet). Receipt-polled in turn.
    - `strategy-*`: Next.js calls the Python sidecar with the concrete `strategyName` to run Wayfinder.
 7. Sidecar runs Wayfinder and returns `{ source: "live", txHashes, status }`.
 
-The Stable Lender strategy was validated against the real `wayfinder-paths` SDK: `deposit()` only moves funds into the strategy wallet, and `update()` is the step that deploys to the selected pool. The funding route is built on real SDK primitives (`BalanceClient.get_enriched_wallet_balances` + `BRAPAdapter.best_quote`) and was verified live against the dev API. A live on-chain run still requires funded Privy wallets and production secrets.
+The Stable Lender strategy was validated against the real `wayfinder-paths` SDK: `deposit()` only moves funds into the strategy wallet, and `update()` is the step that deploys to the selected pool. The funding route is built on real SDK primitives (`BalanceClient.get_enriched_wallet_balances` + `BRAPAdapter.best_quote`) and was verified live against the dev API. `StablecoinYieldStrategy.MIN_GAS` is `0.001` ETH, so the funding plan sends a matching `0.001` ETH gas float before strategy execution. A live on-chain run still requires funded Privy wallets and production secrets.
 
 ## Sidecar Auth
 
@@ -115,10 +115,10 @@ Privy dashboard requirement: server wallet creation must be enabled for the app 
 
 ## What Still Needs Work
 
-1. **Deploy-test Stable Lender**
-   - Confirm Vercel Python installs `wayfinder-paths`.
-   - Confirm the Privy callback signs the real `deposit()` and `update()` transactions end-to-end.
-   - Test with risk `0-20`, amount `>= $2`, and embedded wallet holding Base USDC + Base ETH.
+1. **Run funded Stable Lender live transaction**
+   - Preflight is automated by `scripts/stable_lender_deploy_test.py`.
+   - Live mode still needs a Privy server wallet funded with Base USDC and at least `0.001` Base ETH.
+   - Run with risk `0-20`, amount `>= $2`, and confirm `deposit()` + `update()` both return success.
 
 2. **Persist server wallets**
    - Replace the in-process registry with KV/Postgres.
@@ -138,9 +138,28 @@ Privy dashboard requirement: server wallet creation must be enabled for the app 
 
 ```bash
 pnpm build
-python3.12 -m py_compile api/wayfinder/execute.py
+python3.12 -m py_compile api/wayfinder/execute.py scripts/stable_lender_deploy_test.py
+PYTHONPATH=/private/tmp/tilt-wayfinder-deploytest python3.12 scripts/stable_lender_deploy_test.py
 ```
 
 `pnpm lint` currently prompts for Next.js ESLint setup and is not non-interactive yet.
 
 `GET /api/wayfinder/execute` reports sidecar health and whether `wayfinder_paths` is importable in that Python runtime.
+
+## Stable Lender Deploy Test
+
+Safe preflight, no transactions:
+
+```bash
+python3.12 -m pip install --target /private/tmp/tilt-wayfinder-deploytest -r requirements.txt
+PYTHONPATH=/private/tmp/tilt-wayfinder-deploytest python3.12 scripts/stable_lender_deploy_test.py
+```
+
+Live mode submits real transactions from the provided Privy server wallet:
+
+```bash
+PYTHONPATH=/private/tmp/tilt-wayfinder-deploytest python3.12 scripts/stable_lender_deploy_test.py --live \
+  --wallet-id "$STABLE_LENDER_TEST_WALLET_ID" \
+  --wallet-address "$STABLE_LENDER_TEST_WALLET_ADDRESS" \
+  --amount-usd "$STABLE_LENDER_TEST_AMOUNT_USD"
+```

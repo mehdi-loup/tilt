@@ -185,7 +185,7 @@ export function buildPlan({
   };
 }
 
-const GAS_FUNDING_WEI = 500_000_000_000_000n;
+const GAS_FUNDING_WEI = 1_000_000_000_000_000n;
 
 function formatEth(wei: bigint): string {
   const whole = wei / 1_000_000_000_000_000_000n;
