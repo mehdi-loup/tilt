@@ -72,23 +72,33 @@ PROFILE_STRATEGIES: dict[str, dict[str, Any]] = {
 
 # ─── Funding (wallet holdings → USDC on Base, delivered to server wallet) ─
 #
-# Wayfinder plans + builds the route that turns whatever the wallet holds
-# into the target USDC on Base and delivers it to the server wallet,
-# bridging across chains as needed. Wayfinder owns route selection,
-# slippage, and bridge hops — we only pass the target + recipient and relay
-# the built transactions for the user's embedded wallet to sign.
-#
-# Class/module names are a best-guess pending the real wayfinder-paths swap
-# API — same convention as PROFILE_STRATEGIES above. Verify against the SDK
-# before trusting a live run.
+# Wayfinder has no single "fund this wallet" strategy; funding is built from
+# two SDK primitives:
+#   • BalanceClient.get_enriched_wallet_balances → what the wallet holds,
+#     priced in USD (drives both the balance preset and source selection).
+#   • BRAPAdapter.best_quote → a swap route (token → USDC on Base) with the
+#     unsigned calldata to execute it.
+# A BRAP swap delivers its output to the *signing* wallet, so the route we
+# return ends with a plain USDC transfer that moves the requested amount from
+# the embedded wallet into the server wallet. Every leg is unsigned calldata
+# for the embedded wallet to sign client-side.
 USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+USDC_DECIMALS = 6
 
-FUND_SPEC: dict[str, Any] = {
-    "module": "wayfinder_paths.strategies.swap_strategy.strategy",  # TODO verify
-    "class_name": "SwapStrategy",  # TODO verify
-    "target_token": USDC_BASE,
-    "target_caip2": "eip155:8453",
+# Native-token sentinels: BRAP handles native ETH input itself (no ERC-20
+# approval, value carried in the swap calldata), so we never emit an approve
+# leg for these. The enriched-balances API reports native ETH as "native".
+NATIVE_SENTINELS = {
+    "native",
+    "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "0x0000000000000000000000000000000000000000",
 }
+
+# Skip dust holdings — not worth a swap leg / gas.
+MIN_SOURCE_USD = 0.50
+# Headroom over the USD we need from each swap, to absorb slippage so the
+# final fixed-amount transfer to the server wallet still clears.
+SWAP_BUFFER = 1.01
 
 
 class handler(BaseHTTPRequestHandler):
@@ -392,48 +402,32 @@ async def run_strategy(
 # ─── Funding conversion ──────────────────────────────────────────────────
 
 
-def _make_fund_strategy(from_address: str) -> Any:
-    """Instantiate the Wayfinder swap/bridge planner for `from_address`.
+def _caip2_chain_id(caip2: str) -> int:
+    """`eip155:8453` → 8453."""
+    return int(caip2.rsplit(":", 1)[-1])
 
-    Route-building and balance reads are non-signing, so unlike run_strategy
-    we don't attach a Privy callback here — the embedded wallet signs the
-    built txs client-side. TODO: confirm the planner constructor against the
-    SDK (strategy deposits take signing callbacks; route building shouldn't)."""
+
+async def _enriched_balances(from_address: str) -> list[dict[str, Any]]:
     if not _wayfinder_installed():
         raise StrategyImportError(
             "wayfinder_paths is not installed in this Python runtime"
         )
-    module = __import__(FUND_SPEC["module"], fromlist=[FUND_SPEC["class_name"]])
-    StrategyClass = getattr(module, FUND_SPEC["class_name"])
-    wallet_entry = {"address": from_address, "label": "tilt-user"}
-    return StrategyClass(
-        config={},
-        main_wallet=wallet_entry,
-        strategy_wallet=wallet_entry,
+    from wayfinder_paths.core.clients.BalanceClient import BALANCE_CLIENT
+
+    data = await BALANCE_CLIENT.get_enriched_wallet_balances(
+        wallet_address=from_address, exclude_spam_tokens=True
     )
+    balances = data.get("balances") if isinstance(data, dict) else None
+    return [b for b in (balances or []) if isinstance(b, dict)]
 
 
-async def plan_fund(
-    *,
-    from_address: str,
-    recipient_address: str,
-    target_usdc_units: int,
-    amount_usd: float | None,
-    target_caip2: str,
-) -> dict[str, Any]:
-    """Ask Wayfinder to build the transaction(s) that move the wallet's
-    holdings into `recipient_address` as USDC on Base. Returns unsigned txs
-    for the embedded wallet to sign."""
-    planner = _make_fund_strategy(from_address)
-    # TODO: confirm Wayfinder's route-build method name + signature.
-    route = await planner.build_funding_route(
-        from_address=from_address,
-        recipient=recipient_address,
-        target_token=FUND_SPEC["target_token"],
-        target_caip2=target_caip2,
-        target_amount=target_usdc_units,
+def _bridgeable(b: dict[str, Any]) -> bool:
+    """A holding BRAP can route to USDC on Base. We invest across every EVM
+    chain (BRAP bridges to Base as needed), excluding non-EVM (e.g. Solana)."""
+    return (
+        int(b.get("chain_id") or 0) > 0
+        and str(b.get("chain") or "").lower() != "solana"
     )
-    return {"mode": "plan", "txs": _normalize_txs(route)}
 
 
 async def balance_fund(
@@ -444,36 +438,163 @@ async def balance_fund(
     amount_usd: float | None,
     target_caip2: str,
 ) -> dict[str, Any]:
-    """Report the total investable USD value Wayfinder sees in the wallet,
-    so the UI's 25/50/75/100% presets have a base."""
-    planner = _make_fund_strategy(from_address)
-    # TODO: confirm Wayfinder's balance/portfolio method name + signature.
-    value = await planner.investable_value(
-        from_address=from_address,
-        quote_token=FUND_SPEC["target_token"],
-        quote_caip2=target_caip2,
+    """Total investable USD across all bridgeable chains — the base for the
+    UI's 25/50/75/100% presets. Funding bridges these to USDC on Base."""
+    balances = await _enriched_balances(from_address)
+    total = sum(
+        float(b.get("value_usd") or 0) for b in balances if _bridgeable(b)
     )
-    return {"mode": "balance", "investableUsd": float(value)}
+    return {"mode": "balance", "investableUsd": total}
 
 
-def _normalize_txs(route: Any) -> list[dict[str, Any]]:
-    """Coerce Wayfinder's built route into [{to, data, value, chainId, label}]
-    so the client can sign each leg with the embedded wallet."""
-    raw = route.get("transactions") if isinstance(route, dict) else route
-    out: list[dict[str, Any]] = []
-    for t in raw or []:
-        d = t if isinstance(t, dict) else getattr(t, "__dict__", {})
-        value = d.get("value", "0x0")
-        if isinstance(value, int):
-            value = hex(value)
-        out.append({
-            "to": d.get("to"),
-            "data": d.get("data", "0x"),
-            "value": value or "0x0",
-            "chainId": int(d.get("chainId") or d.get("chain_id") or 8453),
-            "label": d.get("label"),
-        })
-    return out
+async def plan_fund(
+    *,
+    from_address: str,
+    recipient_address: str,
+    target_usdc_units: int,
+    amount_usd: float | None,
+    target_caip2: str,
+) -> dict[str, Any]:
+    """Build the unsigned txs that turn the embedded wallet's holdings into
+    `target_usdc_units` of USDC on Base and deliver them to the server wallet.
+
+    Sources span every bridgeable chain — BRAP quotes a same-chain swap or a
+    cross-chain bridge+swap to USDC on Base as needed. Base holdings are spent
+    first to avoid unnecessary bridge hops. Layout: [approve?, swap]* (each on
+    its source chain), then one ERC-20 transfer of the requested USDC to the
+    recipient on Base. USDC already on Base counts toward the target, no swap.
+    """
+    from wayfinder_paths.adapters.brap_adapter.adapter import BRAPAdapter
+
+    target_chain = _caip2_chain_id(target_caip2)
+    balances = await _enriched_balances(from_address)
+
+    def is_base_usdc(b: dict[str, Any]) -> bool:
+        return (
+            int(b.get("chain_id") or 0) == target_chain
+            and (b.get("address") or "").lower() == USDC_BASE.lower()
+        )
+
+    usdc = sum(int(b.get("amount") or 0) for b in balances if is_base_usdc(b))
+    sources = sorted(
+        (
+            b
+            for b in balances
+            if _bridgeable(b)
+            and not is_base_usdc(b)
+            and float(b.get("value_usd") or 0) >= MIN_SOURCE_USD
+        ),
+        # Base sources first (no bridge), then by USD value.
+        key=lambda b: (
+            int(b.get("chain_id") or 0) == target_chain,
+            float(b.get("value_usd") or 0),
+        ),
+        reverse=True,
+    )
+
+    txs: list[dict[str, Any]] = []
+    brap = BRAPAdapter({}, sign_callback=None, wallet_address=from_address)
+
+    shortfall_units = max(0, target_usdc_units - usdc)
+    for b in sources:
+        if shortfall_units <= 0:
+            break
+        token = b.get("address")
+        value_usd = float(b.get("value_usd") or 0)
+        amount_raw = int(b.get("amount") or 0)
+        src_chain = int(b.get("chain_id") or 0)
+        if not token or amount_raw <= 0 or value_usd <= 0:
+            continue
+
+        need_usd = (shortfall_units / 10**USDC_DECIMALS) * SWAP_BUFFER
+        fraction = min(1.0, need_usd / value_usd)
+        from_amount = min(amount_raw, max(1, _ceil(amount_raw * fraction)))
+
+        ok, quote = await brap.best_quote(
+            from_token_address=token,
+            to_token_address=USDC_BASE,
+            from_chain_id=src_chain,
+            to_chain_id=target_chain,
+            from_address=from_address,
+            amount=str(from_amount),
+        )
+        if not ok or not isinstance(quote, dict):
+            continue
+        calldata = quote.get("calldata") or {}
+        if not calldata.get("data") or not calldata.get("to"):
+            continue
+
+        # approve + swap execute on the source chain.
+        leg_chain = int(calldata.get("chainId") or src_chain)
+        router = calldata["to"]
+        if not quote.get("native_input") and token.lower() not in NATIVE_SENTINELS:
+            txs.append(_tx(
+                to=token,
+                data=_erc20_approve(router, from_amount),
+                chain_id=src_chain,
+                label=f"Approve {b.get('symbol') or 'token'} for swap",
+            ))
+        txs.append(_tx(
+            to=router,
+            data=calldata["data"],
+            chain_id=leg_chain,
+            value=calldata.get("value"),
+            label=f"Swap {b.get('symbol') or 'token'} → USDC on Base",
+        ))
+        shortfall_units -= int(quote.get("output_amount") or 0)
+
+    # Final leg: hand the requested USDC to the server wallet (on Base).
+    txs.append(_tx(
+        to=USDC_BASE,
+        data=_erc20_transfer(recipient_address, target_usdc_units),
+        chain_id=target_chain,
+        label="Transfer USDC to execution wallet",
+    ))
+
+    return {"mode": "plan", "txs": txs}
+
+
+def _ceil(x: float) -> int:
+    return -int(-x // 1)
+
+
+def _tx(
+    *,
+    to: str,
+    data: str,
+    chain_id: int,
+    value: Any = None,
+    label: str | None = None,
+) -> dict[str, Any]:
+    if isinstance(value, str):
+        value = value if value.startswith("0x") else hex(int(value))
+    elif isinstance(value, (int, float)):
+        value = hex(int(value))
+    return {
+        "to": to,
+        "data": data,
+        "value": value or "0x0",
+        "chainId": chain_id,
+        "label": label,
+    }
+
+
+def _erc20_approve(spender: str, amount: int) -> str:
+    # approve(address,uint256)
+    return "0x095ea7b3" + _addr_arg(spender) + _uint_arg(amount)
+
+
+def _erc20_transfer(to: str, amount: int) -> str:
+    # transfer(address,uint256)
+    return "0xa9059cbb" + _addr_arg(to) + _uint_arg(amount)
+
+
+def _addr_arg(addr: str) -> str:
+    return addr.lower().removeprefix("0x").rjust(64, "0")
+
+
+def _uint_arg(value: int) -> str:
+    return format(int(value), "064x")
 
 
 def _serialize_status(status: Any) -> dict[str, Any]:
