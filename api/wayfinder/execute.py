@@ -143,6 +143,27 @@ BASE_GAS_RESERVE_WEI = GAS_FLOAT_WEI + BASE_GAS_PADDING_WEI
 SUPPORTED_CHAINS = {1, 10, 56, 137, 5000, 8453, 42161, 43114}
 
 
+# ─── Funding (wallet holdings → USDC on Base, delivered to server wallet) ─
+#
+# Wayfinder plans + builds the route that turns whatever the wallet holds
+# into the target USDC on Base and delivers it to the server wallet,
+# bridging across chains as needed. Wayfinder owns route selection,
+# slippage, and bridge hops — we only pass the target + recipient and relay
+# the built transactions for the user's embedded wallet to sign.
+#
+# Class/module names are a best-guess pending the real wayfinder-paths swap
+# API — same convention as PROFILE_STRATEGIES above. Verify against the SDK
+# before trusting a live run.
+USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+
+FUND_SPEC: dict[str, Any] = {
+    "module": "wayfinder_paths.strategies.swap_strategy.strategy",  # TODO verify
+    "class_name": "SwapStrategy",  # TODO verify
+    "target_token": USDC_BASE,
+    "target_caip2": "eip155:8453",
+}
+
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 — required by BaseHTTPRequestHandler
         if not INTERNAL_SECRET:
@@ -803,6 +824,93 @@ def _addr_arg(addr: str) -> str:
 
 def _uint_arg(value: int) -> str:
     return format(int(value), "064x")
+
+
+# ─── Funding conversion ──────────────────────────────────────────────────
+
+
+def _make_fund_strategy(from_address: str) -> Any:
+    """Instantiate the Wayfinder swap/bridge planner for `from_address`.
+
+    Route-building and balance reads are non-signing, so unlike run_strategy
+    we don't attach a Privy callback here — the embedded wallet signs the
+    built txs client-side. TODO: confirm the planner constructor against the
+    SDK (strategy deposits take signing callbacks; route building shouldn't)."""
+    if not _wayfinder_installed():
+        raise StrategyImportError(
+            "wayfinder_paths is not installed in this Python runtime"
+        )
+    module = __import__(FUND_SPEC["module"], fromlist=[FUND_SPEC["class_name"]])
+    StrategyClass = getattr(module, FUND_SPEC["class_name"])
+    wallet_entry = {"address": from_address, "label": "tilt-user"}
+    return StrategyClass(
+        config={},
+        main_wallet=wallet_entry,
+        strategy_wallet=wallet_entry,
+    )
+
+
+async def plan_fund(
+    *,
+    from_address: str,
+    recipient_address: str,
+    target_usdc_units: int,
+    amount_usd: float | None,
+    target_caip2: str,
+) -> dict[str, Any]:
+    """Ask Wayfinder to build the transaction(s) that move the wallet's
+    holdings into `recipient_address` as USDC on Base. Returns unsigned txs
+    for the embedded wallet to sign."""
+    planner = _make_fund_strategy(from_address)
+    # TODO: confirm Wayfinder's route-build method name + signature.
+    route = await planner.build_funding_route(
+        from_address=from_address,
+        recipient=recipient_address,
+        target_token=FUND_SPEC["target_token"],
+        target_caip2=target_caip2,
+        target_amount=target_usdc_units,
+    )
+    return {"mode": "plan", "txs": _normalize_txs(route)}
+
+
+async def balance_fund(
+    *,
+    from_address: str,
+    recipient_address: str | None,
+    target_usdc_units: int,
+    amount_usd: float | None,
+    target_caip2: str,
+) -> dict[str, Any]:
+    """Report the total investable USD value Wayfinder sees in the wallet,
+    so the UI's 25/50/75/100% presets have a base."""
+    planner = _make_fund_strategy(from_address)
+    # TODO: confirm Wayfinder's balance/portfolio method name + signature.
+    value = await planner.investable_value(
+        from_address=from_address,
+        quote_token=FUND_SPEC["target_token"],
+        quote_caip2=target_caip2,
+    )
+    return {"mode": "balance", "investableUsd": float(value)}
+
+
+def _normalize_txs(route: Any) -> list[dict[str, Any]]:
+    """Coerce Wayfinder's built route into [{to, data, value, chainId, label}]
+    so the client can sign each leg with the embedded wallet."""
+    raw = route.get("transactions") if isinstance(route, dict) else route
+    out: list[dict[str, Any]] = []
+    for t in raw or []:
+        d = t if isinstance(t, dict) else getattr(t, "__dict__", {})
+        value = d.get("value", "0x0")
+        if isinstance(value, int):
+            value = hex(value)
+        out.append({
+            "to": d.get("to"),
+            "data": d.get("data", "0x"),
+            "value": value or "0x0",
+            "chainId": int(d.get("chainId") or d.get("chain_id") or 8453),
+            "label": d.get("label"),
+        })
+    return out
 
 
 def _serialize_status(status: Any) -> dict[str, Any]:

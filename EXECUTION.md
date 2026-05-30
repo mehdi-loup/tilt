@@ -57,7 +57,7 @@ Known limitation: `lib/wallet-registry.ts` still stores `userId -> walletId` in-
    - `strategy-*`: Next.js calls the Python sidecar with the concrete `strategyName` to run Wayfinder.
 7. Sidecar runs Wayfinder and returns `{ source: "live", txHashes, status }`.
 
-The Stable Lender strategy was validated against the real `wayfinder-paths` SDK: `deposit()` only moves funds into the strategy wallet, and `update()` is the step that deploys to the selected pool. A live on-chain run still requires funded Privy wallets and production secrets.
+The Stable Lender strategy was validated against the real `wayfinder-paths` SDK: `deposit()` only moves funds into the strategy wallet, and `update()` is the step that deploys to the selected pool. The funding route is built on real SDK primitives (`BalanceClient.get_enriched_wallet_balances` + `BRAPAdapter.best_quote`) and was verified live against the dev API. A live on-chain run still requires funded Privy wallets and production secrets.
 
 ## Sidecar Auth
 
