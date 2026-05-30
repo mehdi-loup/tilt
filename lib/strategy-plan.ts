@@ -40,6 +40,11 @@ export interface ClientTx {
   chainId: number;
   /** Optional human label Wayfinder attaches to this leg. */
   label?: string;
+  /** Present on the final transfer when a cross-chain bridge fed it: the
+   * embedded wallet's Base USDC balance (base units, string) must reach this
+   * before the client signs the transfer, since bridged USDC lands on Base
+   * asynchronously after the source-chain swap confirms. */
+  waitForUsdc?: string;
 }
 
 export interface PlanStep {

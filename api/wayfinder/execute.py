@@ -100,6 +100,14 @@ MIN_SOURCE_USD = 0.50
 # final fixed-amount transfer to the server wallet still clears.
 SWAP_BUFFER = 1.01
 
+# Native value (in USD) we leave untouched per chain so the embedded wallet
+# can still pay gas for its own funding txs — and, on Base, the ~0.0005 ETH gas
+# float it sends to the server wallet (see GAS_FUNDING_WEI in strategy-plan.ts).
+# Subtracted from both the investable balance and the spendable amount when a
+# native token is a funding source. Ethereum L1 gas is dear, so it reserves more.
+NATIVE_GAS_RESERVE_USD: dict[int, float] = {1: 20.0, 8453: 3.0}
+DEFAULT_NATIVE_RESERVE_USD = 1.50
+
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 — required by BaseHTTPRequestHandler
@@ -430,6 +438,20 @@ def _bridgeable(b: dict[str, Any]) -> bool:
     )
 
 
+def _gas_reserve_usd(b: dict[str, Any]) -> float:
+    """USD of native value to keep for gas (0 for non-native tokens)."""
+    if (b.get("address") or "").lower() not in NATIVE_SENTINELS:
+        return 0.0
+    return NATIVE_GAS_RESERVE_USD.get(
+        int(b.get("chain_id") or 0), DEFAULT_NATIVE_RESERVE_USD
+    )
+
+
+def _spendable_usd(b: dict[str, Any]) -> float:
+    """Holding's USD value minus any native gas reserve."""
+    return max(0.0, float(b.get("value_usd") or 0) - _gas_reserve_usd(b))
+
+
 async def balance_fund(
     *,
     from_address: str,
@@ -439,11 +461,11 @@ async def balance_fund(
     target_caip2: str,
 ) -> dict[str, Any]:
     """Total investable USD across all bridgeable chains — the base for the
-    UI's 25/50/75/100% presets. Funding bridges these to USDC on Base."""
+    UI's 25/50/75/100% presets. Funding bridges these to USDC on Base. Native
+    holdings are reported net of a per-chain gas reserve so a 100% preset
+    stays executable."""
     balances = await _enriched_balances(from_address)
-    total = sum(
-        float(b.get("value_usd") or 0) for b in balances if _bridgeable(b)
-    )
+    total = sum(_spendable_usd(b) for b in balances if _bridgeable(b))
     return {"mode": "balance", "investableUsd": total}
 
 
@@ -482,18 +504,19 @@ async def plan_fund(
             for b in balances
             if _bridgeable(b)
             and not is_base_usdc(b)
-            and float(b.get("value_usd") or 0) >= MIN_SOURCE_USD
+            and _spendable_usd(b) >= MIN_SOURCE_USD
         ),
-        # Base sources first (no bridge), then by USD value.
+        # Base sources first (no bridge), then by spendable USD value.
         key=lambda b: (
             int(b.get("chain_id") or 0) == target_chain,
-            float(b.get("value_usd") or 0),
+            _spendable_usd(b),
         ),
         reverse=True,
     )
 
     txs: list[dict[str, Any]] = []
     brap = BRAPAdapter({}, sign_callback=None, wallet_address=from_address)
+    bridged = False
 
     shortfall_units = max(0, target_usdc_units - usdc)
     for b in sources:
@@ -501,14 +524,21 @@ async def plan_fund(
             break
         token = b.get("address")
         value_usd = float(b.get("value_usd") or 0)
+        avail_usd = _spendable_usd(b)
         amount_raw = int(b.get("amount") or 0)
         src_chain = int(b.get("chain_id") or 0)
-        if not token or amount_raw <= 0 or value_usd <= 0:
+        if not token or amount_raw <= 0 or avail_usd <= 0:
             continue
 
+        # Spendable raw units after holding back the native gas reserve.
+        spendable_raw = (
+            amount_raw
+            if avail_usd >= value_usd
+            else int(amount_raw * avail_usd / value_usd)
+        )
         need_usd = (shortfall_units / 10**USDC_DECIMALS) * SWAP_BUFFER
-        fraction = min(1.0, need_usd / value_usd)
-        from_amount = min(amount_raw, max(1, _ceil(amount_raw * fraction)))
+        fraction = min(1.0, need_usd / avail_usd)
+        from_amount = min(spendable_raw, max(1, _ceil(spendable_raw * fraction)))
 
         ok, quote = await brap.best_quote(
             from_token_address=token,
@@ -526,6 +556,8 @@ async def plan_fund(
 
         # approve + swap execute on the source chain.
         leg_chain = int(calldata.get("chainId") or src_chain)
+        if leg_chain != target_chain:
+            bridged = True
         router = calldata["to"]
         if not quote.get("native_input") and token.lower() not in NATIVE_SENTINELS:
             txs.append(_tx(
@@ -543,13 +575,31 @@ async def plan_fund(
         ))
         shortfall_units -= int(quote.get("output_amount") or 0)
 
-    # Final leg: hand the requested USDC to the server wallet (on Base).
-    txs.append(_tx(
+    # If routing the holdings can't cover the requested amount (quotes failed
+    # or balance fell short), return no txs + an error rather than a plan whose
+    # final fixed-amount transfer would revert. The build route surfaces this
+    # and blocks execution.
+    if shortfall_units > 0:
+        return {
+            "mode": "plan",
+            "txs": [],
+            "error": "investable balance is insufficient to cover the requested amount",
+        }
+
+    # Final leg: hand the requested USDC to the server wallet (on Base). When a
+    # cross-chain bridge fed this, the USDC arrives on Base asynchronously — the
+    # source-chain swap receipt does not mean it has landed. `waitForUsdc` tells
+    # the client to wait until the embedded wallet's Base USDC balance covers
+    # the transfer before signing it, so the fixed-amount transfer can't revert.
+    transfer = _tx(
         to=USDC_BASE,
         data=_erc20_transfer(recipient_address, target_usdc_units),
         chain_id=target_chain,
         label="Transfer USDC to execution wallet",
-    ))
+    )
+    if bridged:
+        transfer["waitForUsdc"] = str(target_usdc_units)
+    txs.append(transfer)
 
     return {"mode": "plan", "txs": txs}
 

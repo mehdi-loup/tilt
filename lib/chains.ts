@@ -12,6 +12,21 @@ import type { Hex } from "viem";
 export const FUNDING_CHAIN_ID = 8453 as const;
 export const FUNDING_CAIP2 = `eip155:8453` as const;
 
+/** Public read RPCs for the chains funding legs can execute on. Used only to
+ * poll receipts / balances client-side — sending goes through Privy. Chains
+ * not listed fall back to an optimistic wait; the Base USDC settlement gate
+ * backstops cross-chain legs. */
+export const RPC_URLS: Record<number, string> = {
+  1: "https://eth.llamarpc.com",
+  10: "https://mainnet.optimism.io",
+  56: "https://bsc-dataseed.binance.org",
+  137: "https://polygon-rpc.com",
+  5000: "https://rpc.mantle.xyz",
+  8453: "https://mainnet.base.org",
+  42161: "https://arb1.arbitrum.io/rpc",
+  43114: "https://api.avax.network/ext/bc/C/rpc",
+};
+
 export const TOKENS = {
   USDC: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Hex,
 } as const;

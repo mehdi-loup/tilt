@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useCreateWallet, usePrivy, useSendTransaction, useWallets } from "@privy-io/react-auth";
 import type { Plan, PlanStep } from "@/lib/strategy-plan";
+import { RPC_URLS, TOKENS, FUNDING_CHAIN_ID } from "@/lib/chains";
 
 const C = {
   bg: "#0b0d10",
@@ -137,6 +138,11 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
     async (step: PlanStep): Promise<StepState> => {
       if (!embedded) throw new Error("no embedded wallet");
       if (!step.tx) throw new Error("fund step missing pre-built tx");
+      // Cross-chain bridge legs settle on Base asynchronously; gate the final
+      // transfer on the bridged USDC actually arriving before we sign it.
+      if (step.tx.waitForUsdc) {
+        await waitForBaseUsdc(embedded.address, BigInt(step.tx.waitForUsdc));
+      }
       const { hash } = await sendTransaction(
         {
           from: embedded.address,
@@ -147,7 +153,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
         },
         { address: embedded.address },
       );
-      await waitForBaseReceipt(hash);
+      await waitForReceipt(hash, step.tx.chainId);
       return { status: "success", txHashes: [hash] };
     },
     [embedded, sendTransaction],
@@ -777,22 +783,34 @@ function colorForState(s: StepRuntimeStatus, planStatus: "live" | "stub"): strin
   return C.dim2;
 }
 
-async function waitForBaseReceipt(hash: string): Promise<void> {
+async function rpcCall(
+  chainId: number,
+  method: string,
+  params: unknown[],
+): Promise<unknown> {
+  const url = RPC_URLS[chainId];
+  if (!url) return undefined; // unknown chain — caller decides the fallback
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const body = (await res.json().catch(() => null)) as { result?: unknown } | null;
+  return body?.result;
+}
+
+async function waitForReceipt(hash: string, chainId: number): Promise<void> {
+  if (!RPC_URLS[chainId]) {
+    // No read RPC for this chain — proceed optimistically. For cross-chain
+    // funding the Base USDC settlement gate backstops the final transfer.
+    await sleep(4000);
+    return;
+  }
   for (let attempt = 0; attempt < 90; attempt++) {
-    const res = await fetch("https://mainnet.base.org", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_getTransactionReceipt",
-        params: [hash],
-      }),
-    });
-    const body = (await res.json().catch(() => null)) as
-      | { result?: { status?: string } | null }
-      | null;
-    const receipt = body?.result;
+    const receipt = (await rpcCall(chainId, "eth_getTransactionReceipt", [hash])) as
+      | { status?: string }
+      | null
+      | undefined;
     if (receipt) {
       if (receipt.status === "0x0") throw new Error("funding transaction reverted");
       return;
@@ -800,6 +818,22 @@ async function waitForBaseReceipt(hash: string): Promise<void> {
     await sleep(2000);
   }
   throw new Error("funding transaction was not confirmed in time");
+}
+
+/** Poll the embedded wallet's Base USDC balance until it covers `units`, so a
+ * bridge-fed transfer isn't signed before the USDC has landed. Bridges can take
+ * minutes, hence the long ceiling. */
+async function waitForBaseUsdc(address: string, units: bigint): Promise<void> {
+  const data = `0x70a08231${address.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
+  for (let attempt = 0; attempt < 150; attempt++) {
+    const result = (await rpcCall(FUNDING_CHAIN_ID, "eth_call", [
+      { to: TOKENS.USDC, data },
+      "latest",
+    ])) as string | undefined;
+    if (result && result !== "0x" && BigInt(result) >= units) return;
+    await sleep(4000);
+  }
+  throw new Error("bridged USDC did not arrive on Base in time");
 }
 
 function sleep(ms: number): Promise<void> {
