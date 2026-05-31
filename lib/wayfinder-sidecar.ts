@@ -26,6 +26,10 @@ export function wayfinderInternalSecret(): string | undefined {
   return process.env.WAYFINDER_INTERNAL_SECRET ?? process.env.PRIVY_APP_SECRET;
 }
 
+function wayfinderSidecarUrl(origin: string): string {
+  return process.env.WAYFINDER_SIDECAR_URL ?? `${origin}/api/wayfinder/execute`;
+}
+
 /**
  * POST to the colocated Python sidecar. `origin` comes from the inbound
  * request URL; `jwt` is the user's verified Privy access token, forwarded
@@ -45,8 +49,9 @@ export async function callWayfinder(
     };
   }
   let res: Response;
+  const url = wayfinderSidecarUrl(origin);
   try {
-    res = await fetch(`${origin}/api/wayfinder/execute`, {
+    res = await fetch(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -66,5 +71,17 @@ export async function callWayfinder(
     };
   }
   const payload = (await res.json().catch(() => ({}))) as WayfinderResult;
+  if (res.status === 404 && !payload.error) {
+    return {
+      ok: false,
+      status: 404,
+      payload: {
+        ok: false,
+        source: "error",
+        error:
+          "Wayfinder sidecar route not found. Use Vercel dev/deploy for api/wayfinder/execute.py or set WAYFINDER_SIDECAR_URL.",
+      },
+    };
+  }
   return { ok: res.ok, status: res.status, payload };
 }

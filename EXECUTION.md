@@ -113,6 +113,7 @@ Wayfinder receives that callback through `main_wallet_signing_callback` and `str
 | `NEXT_PUBLIC_PRIVY_APP_ID` | Client-side Privy app id |
 | `PRIVY_APP_SECRET` | Server-side Privy auth and fallback sidecar secret |
 | `WAYFINDER_INTERNAL_SECRET` | Optional explicit Next.js -> sidecar shared secret |
+| `WAYFINDER_SIDECAR_URL` | Optional override for the Python sidecar URL in local development |
 | `KV_REST_API_URL` | Vercel KV / Upstash Redis REST URL for persistent server-wallet mappings |
 | `KV_REST_API_TOKEN` | Vercel KV / Upstash Redis REST token |
 | `SERVER_WALLET_REGISTRY_PREFIX` | Optional Redis key prefix for server-wallet mappings |
@@ -148,6 +149,8 @@ PYTHONPATH=/private/tmp/tilt-wayfinder-deploytest python3.12 scripts/stable_lend
 `pnpm lint` currently prompts for Next.js ESLint setup and is not non-interactive yet.
 
 `GET /api/wayfinder/execute` reports sidecar health and whether `wayfinder_paths` is importable in that Python runtime.
+
+When running with `pnpm dev`, only the Next.js app routes are served. The Vercel Python sidecar at `api/wayfinder/execute.py` must be served by Vercel dev/deploy or by setting `WAYFINDER_SIDECAR_URL` to a separately running sidecar; otherwise `/api/plan/balance` will report a sidecar 404.
 
 ## Stable Lender Deploy Test
 
