@@ -1,1 +1,5 @@
--r ../../requirements.txt
+# Vercel's @vercel/python builder does not support `-r <path>` includes, so
+# the function's deps are listed directly. Keep in sync with the root
+# requirements.txt (used by scripts/ for local preflight).
+wayfinder-paths==0.10.0
+httpx>=0.27.0
