@@ -20,6 +20,9 @@ Next.js API
   ├─ /api/plan/execute-step
   └─ Privy server-wallet provisioning
 
+Vercel KV / Upstash Redis
+  └─ persists userId → Privy server-wallet mapping
+
 Python sidecar
   └─ /api/wayfinder/execute
       ├─ protected by x-tilt-internal-secret
@@ -34,7 +37,7 @@ Python sidecar
 - **Embedded wallet**: user-controlled Privy wallet. It holds the user's funds and signs the Wayfinder-built funding transactions.
 - **Server wallet**: app-owned Privy wallet provisioned per user. Wayfinder delivers USDC to it, then drives it for strategy deposits through the Privy signing adapter.
 
-Known limitation: `lib/wallet-registry.ts` still stores `userId -> walletId` in-process. Replace it with KV/Postgres before real users.
+`lib/wallet-registry.ts` persists `userId -> walletId` through Vercel KV / Upstash Redis when `KV_REST_API_URL` + `KV_REST_API_TOKEN` are configured. Local development falls back to an in-process map if KV is missing; production fails closed instead of silently using ephemeral storage.
 
 ## Execution Flow
 
@@ -110,6 +113,9 @@ Wayfinder receives that callback through `main_wallet_signing_callback` and `str
 | `NEXT_PUBLIC_PRIVY_APP_ID` | Client-side Privy app id |
 | `PRIVY_APP_SECRET` | Server-side Privy auth and fallback sidecar secret |
 | `WAYFINDER_INTERNAL_SECRET` | Optional explicit Next.js -> sidecar shared secret |
+| `KV_REST_API_URL` | Vercel KV / Upstash Redis REST URL for persistent server-wallet mappings |
+| `KV_REST_API_TOKEN` | Vercel KV / Upstash Redis REST token |
+| `SERVER_WALLET_REGISTRY_PREFIX` | Optional Redis key prefix for server-wallet mappings |
 
 Privy dashboard requirement: server wallet creation must be enabled for the app before production calls to `walletApi.createWallet`.
 
@@ -120,17 +126,14 @@ Privy dashboard requirement: server wallet creation must be enabled for the app 
    - Live mode still needs a Privy server wallet funded with Base USDC and at least `0.001` Base ETH.
    - Run with risk `0-20`, amount `>= $2`, and confirm `deposit()` + `update()` both return success.
 
-2. **Persist server wallets**
-   - Replace the in-process registry with KV/Postgres.
-
-3. **Strategy receipt polling**
+2. **Strategy receipt polling**
    - Funding txs are receipt-polled.
    - Wayfinder strategy tx hashes are still trusted as returned; add receipt polling after Wayfinder returns.
 
-4. **Withdrawal / recovery**
+3. **Withdrawal / recovery**
    - Add a way to withdraw idle USDC/ETH from the server wallet.
 
-5. **Profiles 2-5**
+4. **Profiles 2-5**
    - Add target-chain funding/bridge steps for Arbitrum, HyperEVM, and Hyperliquid.
    - Split amounts per strategy and reconcile status/receipts.
 

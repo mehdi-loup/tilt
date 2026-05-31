@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { authenticate } from "@/lib/privy-server";
-import { getOrProvisionServerWallet, lookupServerWallet } from "@/lib/wallet-registry";
+import { getOrProvisionServerWallet } from "@/lib/wallet-registry";
 import { buildPlan } from "@/lib/strategy-plan";
 import { callWayfinder } from "@/lib/wayfinder-sidecar";
 
@@ -39,8 +39,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "bad request body" }, { status: 400 });
   }
 
-  const wallet =
-    lookupServerWallet(user.userId) ?? (await getOrProvisionServerWallet(user.userId));
+  const wallet = await getOrProvisionServerWallet(user.userId);
 
   // Re-derive the plan deterministically and locate the step. Funding txs
   // aren't needed here — only client-signed steps carry a tx.
