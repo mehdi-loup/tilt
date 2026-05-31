@@ -71,6 +71,15 @@ The Stable Lender strategy was validated against the real `wayfinder-paths` SDK:
 
 Direct client calls without the internal secret return `403`.
 
+## Running the Sidecar (local & prod)
+
+The sidecar is a Vercel Python function (`api/wayfinder/execute.py`). It needs `WAYFINDER_API_KEY` for the SDK's balance/quote calls; with no `config.json` present it targets `https://wayfinder.ai/api`.
+
+- **`next dev`** does not serve Python functions, so `/api/wayfinder/execute` 404s ("Wayfinder sidecar route not found"). Either:
+  - run `vercel dev` (serves the function locally — `vercel pull` first for env), or
+  - keep `next dev` and set `WAYFINDER_SIDECAR_URL` to a deployed sidecar (e.g. `https://tilt-hazel.vercel.app/api/wayfinder/execute`); the local `PRIVY_APP_SECRET`/`WAYFINDER_INTERNAL_SECRET` must match the deployment's.
+- **Production**: the Next routes self-fetch `${origin}/api/wayfinder/execute`, so open the app on the **public** domain (`tilt-hazel.vercel.app`). On a deployment-protected URL (the `*-projects.vercel.app` git/preview aliases) that self-fetch hits the 401 auth wall and the sidecar appears unreachable.
+
 ## Privy Signing Adapter
 
 The sidecar creates a Wayfinder signing callback around Privy's wallet RPC:
