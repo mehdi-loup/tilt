@@ -27,8 +27,9 @@ interface RedisResponse<T> {
 
 const keyPrefix = process.env.SERVER_WALLET_REGISTRY_PREFIX ?? "tilt:server-wallet";
 const lockTtlSeconds = 30;
+// Per-instance cache in front of Redis. When KV isn't configured (local dev)
+// this map is the store of record instead of just a cache.
 const localCache = new Map<string, ServerWallet>();
-const memoryFallback = new Map<string, ServerWallet>();
 
 const redisUrl = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
 const redisToken = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -67,7 +68,17 @@ export async function getOrProvisionServerWallet(userId: string): Promise<Server
       address: wallet.address,
       chainType: "ethereum",
     };
-    await writePersistedWallet(userId, entry);
+    try {
+      await writePersistedWallet(userId, entry);
+    } catch (err) {
+      // The Privy wallet exists but we couldn't record it; a retry will mint a
+      // fresh one, so log the orphan's id to keep it traceable.
+      console.error(
+        `Orphaned server wallet ${entry.walletId} (${entry.address}) for user ${userId}: persistence failed`,
+        err,
+      );
+      throw err;
+    }
     localCache.set(userId, entry);
     return entry;
   } finally {
@@ -79,9 +90,8 @@ export async function lookupServerWallet(userId: string): Promise<ServerWallet |
   const cached = localCache.get(userId);
   if (cached) return cached;
 
-  if (!registryConfigured) {
-    return memoryFallback.get(userId);
-  }
+  // Dev fallback: localCache is the store, so a miss means "not provisioned".
+  if (!registryConfigured) return undefined;
 
   const raw = await redisCommand<unknown>(["GET", serverWalletKey(userId)]);
   const wallet = parseWallet(raw);
@@ -90,7 +100,7 @@ export async function lookupServerWallet(userId: string): Promise<ServerWallet |
 }
 
 async function getOrProvisionMemoryWallet(userId: string): Promise<ServerWallet> {
-  const cached = memoryFallback.get(userId);
+  const cached = localCache.get(userId);
   if (cached) return cached;
 
   const wallet = await privy.walletApi.createWallet({ chainType: "ethereum" });
@@ -99,20 +109,31 @@ async function getOrProvisionMemoryWallet(userId: string): Promise<ServerWallet>
     address: wallet.address,
     chainType: "ethereum",
   };
-  memoryFallback.set(userId, entry);
   localCache.set(userId, entry);
   return entry;
 }
 
 async function writePersistedWallet(userId: string, wallet: ServerWallet): Promise<void> {
-  const result = await redisCommand<string>([
-    "SET",
-    serverWalletKey(userId),
-    JSON.stringify(wallet),
-  ]);
-  if (result !== "OK") {
-    throw new Error("Failed to persist server wallet mapping");
+  // Retry transient KV failures before giving up — a failed write here leaks
+  // the just-created Privy wallet (see caller).
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (attempt > 0) await sleep(200);
+    try {
+      const result = await redisCommand<string>([
+        "SET",
+        serverWalletKey(userId),
+        JSON.stringify(wallet),
+      ]);
+      if (result === "OK") return;
+      lastErr = new Error("Failed to persist server wallet mapping");
+    } catch (err) {
+      lastErr = err;
+    }
   }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Failed to persist server wallet mapping");
 }
 
 async function acquireLock(lockKey: string, token: string): Promise<boolean> {
@@ -138,8 +159,12 @@ async function releaseLock(lockKey: string, token: string): Promise<void> {
 }
 
 async function waitForPersistedWallet(userId: string): Promise<ServerWallet | undefined> {
-  for (let i = 0; i < 20; i += 1) {
-    await sleep(250);
+  // Poll past the lock's TTL so we don't give up while the holder is still
+  // provisioning (Privy createWallet can take a few seconds).
+  const pollMs = 500;
+  const attempts = Math.ceil((lockTtlSeconds * 1000) / pollMs) + 2;
+  for (let i = 0; i < attempts; i += 1) {
+    await sleep(pollMs);
     const wallet = await lookupServerWallet(userId);
     if (wallet) return wallet;
   }
