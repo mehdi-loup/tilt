@@ -44,6 +44,8 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
   const embedded = wallets.find((w) => w.walletClientType === "privy");
   const [amount, setAmount] = useState(0);
   const [investableUsd, setInvestableUsd] = useState<number | null>(null);
+  const [balanceErr, setBalanceErr] = useState<string | null>(null);
+  const [balanceLoading, setBalanceLoading] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [planErr, setPlanErr] = useState<string | null>(null);
   const [quoteWarning, setQuoteWarning] = useState<string | null>(null);
@@ -63,9 +65,16 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
 
   // Ask Wayfinder how much the wallet can invest, for the amount presets.
   useEffect(() => {
-    if (!embedded || !authenticated) return;
+    if (!embedded || !authenticated) {
+      setInvestableUsd(null);
+      setBalanceErr(null);
+      setBalanceLoading(false);
+      return;
+    }
     let cancelled = false;
     (async () => {
+      setBalanceLoading(true);
+      setBalanceErr(null);
       try {
         const jwt = await getAccessToken();
         const res = await fetch("/api/plan/balance", {
@@ -73,10 +82,22 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
           headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
           body: JSON.stringify({ embeddedWalletAddress: embedded.address }),
         });
-        const body = (await res.json().catch(() => ({}))) as { investableUsd?: number | null };
-        if (!cancelled) setInvestableUsd(body.investableUsd ?? null);
-      } catch {
-        if (!cancelled) setInvestableUsd(null);
+        const body = (await res.json().catch(() => ({}))) as {
+          investableUsd?: number | null;
+          error?: string;
+        };
+        if (!res.ok) throw new Error(body.error ?? `balance HTTP ${res.status}`);
+        if (typeof body.investableUsd !== "number") {
+          throw new Error("Wayfinder balance unavailable");
+        }
+        if (!cancelled) setInvestableUsd(body.investableUsd);
+      } catch (err) {
+        if (!cancelled) {
+          setInvestableUsd(null);
+          setBalanceErr(err instanceof Error ? err.message : "balance unavailable");
+        }
+      } finally {
+        if (!cancelled) setBalanceLoading(false);
       }
     })();
     return () => {
@@ -299,6 +320,8 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
             err={planErr}
             minAmount={MIN_EXECUTE_USD}
             investableUsd={investableUsd}
+            balanceErr={balanceErr}
+            balanceLoading={balanceLoading}
           />
         )}
 
@@ -488,6 +511,8 @@ function PlanIntake({
   err,
   minAmount,
   investableUsd,
+  balanceErr,
+  balanceLoading,
 }: {
   amount: number;
   onAmount: (v: number) => void;
@@ -496,9 +521,18 @@ function PlanIntake({
   err: string | null;
   minAmount: number;
   investableUsd: number | null;
+  balanceErr: string | null;
+  balanceLoading: boolean;
 }) {
   const overBalance = investableUsd !== null && amount > investableUsd;
   const disabled = building || amount < minAmount || overBalance;
+  const balanceLabel = balanceLoading
+    ? "BALANCE …"
+    : balanceErr
+      ? "BALANCE UNAVAILABLE"
+      : investableUsd === null
+        ? "BALANCE --"
+        : `BALANCE $${investableUsd.toFixed(2)}`;
   return (
     <div style={{ marginTop: 24 }}>
       <div
@@ -512,8 +546,15 @@ function PlanIntake({
         <div style={{ fontFamily: C.mono, fontSize: 11, color: C.sub, letterSpacing: 1 }}>
           AMOUNT TO INVEST
         </div>
-        <div style={{ fontFamily: C.mono, fontSize: 11, color: C.sub, letterSpacing: 0.6 }}>
-          {investableUsd === null ? "BALANCE …" : `BALANCE $${investableUsd.toFixed(2)}`}
+        <div
+          style={{
+            fontFamily: C.mono,
+            fontSize: 11,
+            color: balanceErr ? C.warn : C.sub,
+            letterSpacing: 0.6,
+          }}
+        >
+          {balanceLabel}
         </div>
       </div>
       <input
@@ -581,6 +622,11 @@ function PlanIntake({
       {overBalance && (
         <div style={{ color: C.warn, fontFamily: C.mono, fontSize: 11, marginBottom: 12 }}>
           Amount exceeds your investable balance.
+        </div>
+      )}
+      {balanceErr && (
+        <div style={{ color: C.warn, fontFamily: C.mono, fontSize: 11, marginBottom: 12 }}>
+          Balance unavailable: {balanceErr}
         </div>
       )}
       {err && (

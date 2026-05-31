@@ -27,12 +27,29 @@ export async function POST(req: Request) {
   }
 
   const origin = new URL(req.url).origin;
-  const { payload } = await callWayfinder(origin, user.jwt, {
+  const { ok, status, payload } = await callWayfinder(origin, user.jwt, {
     operation: "fund",
     mode: "balance",
     fromAddress: body.embeddedWalletAddress,
     caip2: FUNDING_CAIP2,
   });
+  if (!ok || !payload.ok) {
+    return NextResponse.json(
+      {
+        investableUsd: null,
+        error: payload.error ?? `sidecar HTTP ${status}`,
+        source: payload.source ?? "error",
+      },
+      { status: status >= 400 ? status : 502 },
+    );
+  }
 
-  return NextResponse.json({ investableUsd: payload.investableUsd ?? null });
+  if (typeof payload.investableUsd !== "number") {
+    return NextResponse.json(
+      { investableUsd: null, error: "Wayfinder did not return an investable balance" },
+      { status: 502 },
+    );
+  }
+
+  return NextResponse.json({ investableUsd: payload.investableUsd });
 }
