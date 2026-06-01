@@ -7,12 +7,15 @@ import { callWayfinder } from "@/lib/wayfinder-sidecar";
 
 export const dynamic = "force-dynamic";
 
-/** Is the server wallet already funded for this amount (USDC + gas float on
- * Base)? If so the build skips funding and the plan is just the strategy
- * step(s) — so a retry resumes from where it failed instead of re-moving funds. */
-async function serverWalletFunded(address: string, targetUsdcUnits: bigint): Promise<boolean> {
+/** The server (execution) wallet's current Base USDC + native ETH balances.
+ * Used to fund only the shortfall and skip the gas float when already present,
+ * so changing the amount or retrying doesn't re-move funds already delivered.
+ * Returns zeros on RPC failure (→ full funding, never under-funds). */
+async function serverWalletBalances(
+  address: string,
+): Promise<{ usdc: bigint; eth: bigint }> {
   const rpc = RPC_URLS[FUNDING_CHAIN_ID];
-  if (!rpc) return false;
+  if (!rpc) return { usdc: 0n, eth: 0n };
   const call = async (method: string, params: unknown[]) => {
     const res = await fetch(rpc, {
       method: "POST",
@@ -29,10 +32,12 @@ async function serverWalletFunded(address: string, targetUsdcUnits: bigint): Pro
       call("eth_call", [{ to: TOKENS.USDC, data: balData }, "latest"]),
       call("eth_getBalance", [address, "latest"]),
     ]);
-    if (!usdcHex || !ethHex) return false;
-    return BigInt(usdcHex) >= targetUsdcUnits && BigInt(ethHex) >= GAS_FUNDING_WEI;
+    return {
+      usdc: usdcHex ? BigInt(usdcHex) : 0n,
+      eth: ethHex ? BigInt(ethHex) : 0n,
+    };
   } catch {
-    return false;
+    return { usdc: 0n, eth: 0n };
   }
 }
 
@@ -89,51 +94,61 @@ export async function POST(req: Request) {
     return NextResponse.json({ plan: preview, serverWallet: wallet });
   }
 
-  // Already funded (e.g. retry after a prior run delivered USDC + gas to the
-  // server wallet): skip funding, return a plan with only the strategy step(s).
-  if (await serverWalletFunded(wallet.address, usdcUnits(body.amountUsd))) {
+  // Fund only the shortfall: account for USDC/gas the server wallet already
+  // holds (from a prior run / a different amount), so we never re-move funds
+  // that are already there.
+  const target = usdcUnits(body.amountUsd);
+  const { usdc: serverUsdc, eth: serverEth } = await serverWalletBalances(wallet.address);
+  const shortfallUnits = target > serverUsdc ? target - serverUsdc : 0n;
+  const includeGasFloat = serverEth < GAS_FUNDING_WEI;
+
+  // Nothing to move — server wallet already holds the amount + gas.
+  if (shortfallUnits === 0n && !includeGasFloat) {
     const plan = buildPlan({
       risk: body.risk,
       amountUsd: body.amountUsd,
       embeddedWalletAddress: body.embeddedWalletAddress,
       serverWalletAddress: wallet.address,
-      skipFunding: true,
     });
     return NextResponse.json({ plan, serverWallet: wallet });
   }
 
-  // Ask Wayfinder to plan + build the funding transactions: convert whatever
-  // the connected funding wallet holds into the target USDC on Base and
-  // deliver it to the server wallet.
+  // Ask Wayfinder to plan + build the funding transactions for the shortfall:
+  // convert what the connected wallet holds into USDC on Base and deliver it to
+  // the server wallet. Skipped when only the gas float is missing.
   const origin = new URL(req.url).origin;
-  const planned = await callWayfinder(origin, user.jwt, {
-    operation: "fund",
-    mode: "plan",
-    amountUsd: body.amountUsd,
-    targetUsdcUnits: usdcUnits(body.amountUsd).toString(),
-    fromAddress: body.embeddedWalletAddress,
-    recipientAddress: wallet.address,
-    caip2: FUNDING_CAIP2,
-  });
-
-  if (!planned.ok || !planned.payload.ok || !planned.payload.txs?.length) {
-    // Wayfinder unavailable (sidecar down, not installed, etc.). Return the
-    // plan without funding txs so the UI blocks execution honestly instead
-    // of inventing a route.
-    return NextResponse.json({
-      plan: preview,
-      serverWallet: wallet,
-      quoteError: planned.payload.error ?? "Wayfinder funding plan unavailable",
+  let fundingTxs: ClientTx[] | undefined;
+  if (shortfallUnits > 0n) {
+    const planned = await callWayfinder(origin, user.jwt, {
+      operation: "fund",
+      mode: "plan",
+      amountUsd: body.amountUsd,
+      targetUsdcUnits: shortfallUnits.toString(),
+      fromAddress: body.embeddedWalletAddress,
+      recipientAddress: wallet.address,
+      caip2: FUNDING_CAIP2,
     });
+
+    if (!planned.ok || !planned.payload.ok || !planned.payload.txs?.length) {
+      // Wayfinder unavailable (sidecar down, not installed, etc.). Return the
+      // plan without funding txs so the UI blocks execution honestly instead
+      // of inventing a route.
+      return NextResponse.json({
+        plan: preview,
+        serverWallet: wallet,
+        quoteError: planned.payload.error ?? "Wayfinder funding plan unavailable",
+      });
+    }
+    fundingTxs = planned.payload.txs as ClientTx[];
   }
 
-  const fundingTxs = planned.payload.txs as ClientTx[];
   const plan = buildPlan({
     risk: body.risk,
     amountUsd: body.amountUsd,
     embeddedWalletAddress: body.embeddedWalletAddress,
     serverWalletAddress: wallet.address,
     fundingTxs,
+    includeGasFloat,
   });
 
   return NextResponse.json({ plan, serverWallet: wallet });

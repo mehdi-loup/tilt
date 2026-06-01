@@ -94,10 +94,9 @@ interface BuildArgs {
    * Base. Absent during server-side re-derivation, where only strategy
    * steps matter — those legs are emitted without a signable tx. */
   fundingTxs?: ClientTx[];
-  /** Skip the gas-float + funding legs entirely (e.g. on a retry where the
-   * server wallet is already funded). The plan then contains only the strategy
-   * step(s). */
-  skipFunding?: boolean;
+  /** Include the ETH gas-float step. Omitted when the server wallet already
+   * holds enough Base gas (e.g. on a retry). */
+  includeGasFloat?: boolean;
 }
 
 export function buildPlan({
@@ -106,7 +105,7 @@ export function buildPlan({
   embeddedWalletAddress,
   serverWalletAddress,
   fundingTxs,
-  skipFunding,
+  includeGasFloat,
 }: BuildArgs): Plan {
   const profile = profileFor(risk);
   const composition = PROFILE_COMPOSITION[profile.id];
@@ -116,26 +115,28 @@ export function buildPlan({
 
   const steps: PlanStep[] = [];
 
-  if (executable && !skipFunding) {
+  if (executable) {
     // Gas float so the server wallet can pay for the strategy deposit on
-    // Base after Wayfinder delivers USDC to it.
-    steps.push({
-      id: "fund-gas",
-      kind: "fund",
-      label: `Fund gas · ${formatEth(GAS_FUNDING_WEI)} ETH`,
-      description: `Transfer ${formatEth(
-        GAS_FUNDING_WEI,
-      )} ETH on Base so the execution wallet can pay gas for Wayfinder transactions.`,
-      signer: "embedded",
-      status: "live",
-      chainId: FUNDING_CHAIN_ID,
-      tx: {
-        to: serverWalletAddress,
-        data: "0x",
-        value: `0x${GAS_FUNDING_WEI.toString(16)}`,
+    // Base after Wayfinder delivers USDC to it. Skipped when it already has gas.
+    if (includeGasFloat) {
+      steps.push({
+        id: "fund-gas",
+        kind: "fund",
+        label: `Fund gas · ${formatEth(GAS_FUNDING_WEI)} ETH`,
+        description: `Transfer ${formatEth(
+          GAS_FUNDING_WEI,
+        )} ETH on Base so the execution wallet can pay gas for Wayfinder transactions.`,
+        signer: "embedded",
+        status: "live",
         chainId: FUNDING_CHAIN_ID,
-      },
-    });
+        tx: {
+          to: serverWalletAddress,
+          data: "0x",
+          value: `0x${GAS_FUNDING_WEI.toString(16)}`,
+          chainId: FUNDING_CHAIN_ID,
+        },
+      });
+    }
 
     // Wayfinder-planned funding legs: one signable step per built tx. These
     // move whatever the user holds into the server wallet as USDC on Base.
