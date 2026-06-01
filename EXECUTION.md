@@ -39,6 +39,16 @@ Python sidecar — Cloud Run (service tilt-wayfinder), reached via WAYFINDER_SID
 
 `lib/wallet-registry.ts` persists `userId -> walletId` through Vercel KV / Upstash Redis when `KV_REST_API_URL` + `KV_REST_API_TOKEN` are configured. Local development falls back to an in-process map if KV is missing; production fails closed instead of silently using ephemeral storage.
 
+### Decision: funding wallet signs every funding tx (revisit later)
+
+The funding/embedded wallet is self-custodial, so moving funds out of it
+requires a user signature per tx (external wallet → wallet popup; Privy embedded
+→ Privy confirmation UI). We keep it this way for now: the user signs the funding
+legs, after which the app-owned server wallet runs the strategy with no further
+prompts. Revisit if the per-tx signing UX is a problem — Privy "session
+signers" / delegated actions could make embedded-wallet signing promptless, at
+the cost of moving toward app-delegated custody of the funding wallet.
+
 ## Execution Flow
 
 1. User connects with Privy and chooses a USD amount to invest (25/50/75/100%
