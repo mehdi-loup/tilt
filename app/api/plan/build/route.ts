@@ -1,11 +1,40 @@
 import { NextResponse } from "next/server";
 import { authenticate } from "@/lib/privy-server";
 import { getOrProvisionServerWallet } from "@/lib/wallet-registry";
-import { buildPlan, type ClientTx } from "@/lib/strategy-plan";
-import { FUNDING_CAIP2, usdcUnits } from "@/lib/chains";
+import { buildPlan, GAS_FUNDING_WEI, type ClientTx } from "@/lib/strategy-plan";
+import { FUNDING_CAIP2, FUNDING_CHAIN_ID, RPC_URLS, TOKENS, usdcUnits } from "@/lib/chains";
 import { callWayfinder } from "@/lib/wayfinder-sidecar";
 
 export const dynamic = "force-dynamic";
+
+/** Is the server wallet already funded for this amount (USDC + gas float on
+ * Base)? If so the build skips funding and the plan is just the strategy
+ * step(s) — so a retry resumes from where it failed instead of re-moving funds. */
+async function serverWalletFunded(address: string, targetUsdcUnits: bigint): Promise<boolean> {
+  const rpc = RPC_URLS[FUNDING_CHAIN_ID];
+  if (!rpc) return false;
+  const call = async (method: string, params: unknown[]) => {
+    const res = await fetch(rpc, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      cache: "no-store",
+    });
+    const body = (await res.json().catch(() => null)) as { result?: string } | null;
+    return body?.result;
+  };
+  try {
+    const balData = `0x70a08231${address.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
+    const [usdcHex, ethHex] = await Promise.all([
+      call("eth_call", [{ to: TOKENS.USDC, data: balData }, "latest"]),
+      call("eth_getBalance", [address, "latest"]),
+    ]);
+    if (!usdcHex || !ethHex) return false;
+    return BigInt(usdcHex) >= targetUsdcUnits && BigInt(ethHex) >= GAS_FUNDING_WEI;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * POST /api/plan/build
@@ -58,6 +87,19 @@ export async function POST(req: Request) {
   // Preview-only profiles never fund — return as-is.
   if (!preview.executable) {
     return NextResponse.json({ plan: preview, serverWallet: wallet });
+  }
+
+  // Already funded (e.g. retry after a prior run delivered USDC + gas to the
+  // server wallet): skip funding, return a plan with only the strategy step(s).
+  if (await serverWalletFunded(wallet.address, usdcUnits(body.amountUsd))) {
+    const plan = buildPlan({
+      risk: body.risk,
+      amountUsd: body.amountUsd,
+      embeddedWalletAddress: body.embeddedWalletAddress,
+      serverWalletAddress: wallet.address,
+      skipFunding: true,
+    });
+    return NextResponse.json({ plan, serverWallet: wallet });
   }
 
   // Ask Wayfinder to plan + build the funding transactions: convert whatever

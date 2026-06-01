@@ -94,6 +94,10 @@ interface BuildArgs {
    * Base. Absent during server-side re-derivation, where only strategy
    * steps matter — those legs are emitted without a signable tx. */
   fundingTxs?: ClientTx[];
+  /** Skip the gas-float + funding legs entirely (e.g. on a retry where the
+   * server wallet is already funded). The plan then contains only the strategy
+   * step(s). */
+  skipFunding?: boolean;
 }
 
 export function buildPlan({
@@ -102,6 +106,7 @@ export function buildPlan({
   embeddedWalletAddress,
   serverWalletAddress,
   fundingTxs,
+  skipFunding,
 }: BuildArgs): Plan {
   const profile = profileFor(risk);
   const composition = PROFILE_COMPOSITION[profile.id];
@@ -111,7 +116,7 @@ export function buildPlan({
 
   const steps: PlanStep[] = [];
 
-  if (executable) {
+  if (executable && !skipFunding) {
     // Gas float so the server wallet can pay for the strategy deposit on
     // Base after Wayfinder delivers USDC to it.
     steps.push({
@@ -185,7 +190,7 @@ export function buildPlan({
   };
 }
 
-const GAS_FUNDING_WEI = 1_000_000_000_000_000n;
+export const GAS_FUNDING_WEI = 1_000_000_000_000_000n;
 
 function formatEth(wei: bigint): string {
   const whole = wei / 1_000_000_000_000_000_000n;
