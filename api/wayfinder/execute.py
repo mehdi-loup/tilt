@@ -28,9 +28,31 @@ import asyncio
 import base64
 import json
 import os
+import threading
 import traceback
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Awaitable, Callable
+
+
+# One persistent event loop for the whole process, run in a background thread.
+# The Wayfinder SDK holds module-level httpx.AsyncClient singletons that bind to
+# the loop they first run on; `asyncio.run` per request closes that loop, so the
+# next request (on a warm Cloud Run instance / ThreadingHTTPServer thread) reused
+# a client on a dead loop → "Event loop is closed". Submitting every coroutine to
+# one long-lived loop keeps those clients valid across requests.
+_LOOP: asyncio.AbstractEventLoop | None = None
+_LOOP_LOCK = threading.Lock()
+
+
+def _run(coro: Awaitable[Any]) -> Any:
+    global _LOOP
+    if _LOOP is None or _LOOP.is_closed():
+        with _LOOP_LOCK:
+            if _LOOP is None or _LOOP.is_closed():
+                loop = asyncio.new_event_loop()
+                threading.Thread(target=loop.run_forever, daemon=True).start()
+                _LOOP = loop
+    return asyncio.run_coroutine_threadsafe(coro, _LOOP).result()
 
 # Privy HTTP basic auth
 PRIVY_API_BASE = os.environ.get("PRIVY_API_URL", "https://api.privy.io")
@@ -211,7 +233,7 @@ class handler(BaseHTTPRequestHandler):
 
         # ─── Drive Wayfinder ─────────────────────────────────────────
         try:
-            result = asyncio.run(
+            result = _run(
                 run_strategy(
                     strategy_name=strategy_name,
                     spec=spec,
@@ -280,7 +302,7 @@ class handler(BaseHTTPRequestHandler):
 
         runner = balance_fund if mode == "balance" else plan_fund
         try:
-            result = asyncio.run(
+            result = _run(
                 runner(
                     from_address=from_address,
                     recipient_address=recipient_address,
@@ -650,15 +672,17 @@ async def balance_fund(
     reserve, so a 100% preset stays executable."""
     balances = await _enriched_balances(from_address)
     base_gas_ok = _base_gas_ok(balances)
-    # No Base ETH for the gas float ⇒ nothing is deployable, so report nothing
-    # investable rather than a number the user can't actually act on.
-    if not base_gas_ok:
-        return {"mode": "balance", "investableUsd": 0.0}
     native_by_chain = _native_usd_by_chain(balances)
+    gross = sum(float(b.get("value_usd") or 0) for b in balances if _bridgeable(b))
     total = sum(
         _spendable_usd(b)
         for b in balances
         if _usable_chain(b, native_by_chain, base_gas_ok)
+    )
+    print(
+        f"[balance] from={from_address} holdings={len(balances)} "
+        f"base_gas_ok={base_gas_ok} gross_usd={gross:.2f} investable={total:.2f}",
+        flush=True,
     )
     return {"mode": "balance", "investableUsd": total}
 
