@@ -1,0 +1,6 @@
+# Cloud Run-only sidecar artifacts. Excluded so Vercel doesn't build
+# api/wayfinder/server.py as a second (heavy) Python function. The sidecar
+# runs on Cloud Run; the app reaches it via WAYFINDER_SIDECAR_URL.
+api/wayfinder/server.py
+api/wayfinder/Dockerfile
+api/wayfinder/.gcloudignore

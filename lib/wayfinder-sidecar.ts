@@ -56,7 +56,10 @@ export async function callWayfinder(
       headers: {
         "content-type": "application/json",
         "x-tilt-internal-secret": secret,
-        authorization: `Bearer ${jwt}`,
+        // Not `Authorization`: Cloud Run intercepts Bearer tokens as Google IAM
+        // auth and 401s anything that isn't a Google token. The sidecar reads
+        // the user JWT from this custom header instead.
+        "x-tilt-user-jwt": jwt,
       },
       body: JSON.stringify(body),
     });

@@ -41,6 +41,8 @@ PRIVY_APP_SECRET = os.environ.get("PRIVY_APP_SECRET", "")
 INTERNAL_SECRET = os.environ.get("WAYFINDER_INTERNAL_SECRET") or PRIVY_APP_SECRET
 
 DEFAULT_CAIP2 = "eip155:8453"  # Base mainnet
+SDK_LEGACY_API_BASE_URL = "https://wayfinder.ai/api"
+DEFAULT_WAYFINDER_API_BASE_URL = "https://strategies.wayfinder.ai/api/v1"
 
 
 # ─── Profile/step → Wayfinder strategy mapping ─────────────────────────────
@@ -232,7 +234,7 @@ class handler(BaseHTTPRequestHandler):
             self._respond(502, {
                 "ok": False,
                 "source": "wayfinder-error",
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": _wayfinder_error_message(exc),
                 "trace": traceback.format_exc(),
             })
             return
@@ -299,7 +301,7 @@ class handler(BaseHTTPRequestHandler):
             self._respond(502, {
                 "ok": False,
                 "source": "wayfinder-error",
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": _wayfinder_error_message(exc),
                 "trace": traceback.format_exc(),
             })
             return
@@ -307,6 +309,13 @@ class handler(BaseHTTPRequestHandler):
         self._respond(200, {"ok": True, "source": "live", **result})
 
     def _user_jwt(self) -> str:
+        # Primary: a custom header. Cloud Run intercepts `Authorization: Bearer`
+        # and validates it as a Google IAM token (401s anything else), so the
+        # Next layer forwards the Privy JWT here instead. Fall back to
+        # Authorization for the Vercel-native (colocated) path.
+        jwt = self.headers.get("x-tilt-user-jwt", "").strip()
+        if jwt:
+            return jwt
         auth = self.headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             return auth[7:].strip()
@@ -331,6 +340,44 @@ def _wayfinder_installed() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _configure_wayfinder_sdk() -> None:
+    """Set the SDK API host for serverless runs that do not ship config.json."""
+    from wayfinder_paths.core import config as wf_config
+
+    config = dict(wf_config.CONFIG or {})
+    system = dict(config.get("system") or {})
+    configured_url = str(system.get("api_base_url") or "").strip().rstrip("/")
+    env_url = os.environ.get("WAYFINDER_API_BASE_URL")
+    selected_url = (env_url.strip().rstrip("/") if env_url else configured_url)
+    if not selected_url or selected_url == SDK_LEGACY_API_BASE_URL:
+        selected_url = DEFAULT_WAYFINDER_API_BASE_URL
+
+    system["api_base_url"] = selected_url
+    config["system"] = system
+    wf_config.set_config(config)
+
+
+def _wayfinder_error_message(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    request = getattr(exc, "request", None) or getattr(response, "request", None)
+    url = str(getattr(request, "url", ""))
+
+    if status_code == 401:
+        return (
+            "Wayfinder API rejected the request (401). "
+            "Set a valid WAYFINDER_API_KEY in the sidecar environment."
+        )
+    if status_code == 404 and SDK_LEGACY_API_BASE_URL in url:
+        return (
+            f"Wayfinder SDK API base {SDK_LEGACY_API_BASE_URL} returned 404. "
+            f"Use {DEFAULT_WAYFINDER_API_BASE_URL} or set WAYFINDER_API_BASE_URL."
+        )
+    if status_code:
+        return f"Wayfinder API request failed ({status_code})."
+    return f"{type(exc).__name__}: {exc}"
 
 
 # ─── Privy-as-Wayfinder signing-callback adapter ─────────────────────────
@@ -428,6 +475,7 @@ async def run_strategy(
         raise StrategyImportError(
             "wayfinder_paths is not installed in this Python runtime"
         )
+    _configure_wayfinder_sdk()
 
     module_path: str = spec["module"]
     class_name: str = spec["class_name"]
@@ -504,6 +552,7 @@ async def _enriched_balances(from_address: str) -> list[dict[str, Any]]:
         raise StrategyImportError(
             "wayfinder_paths is not installed in this Python runtime"
         )
+    _configure_wayfinder_sdk()
     from wayfinder_paths.core.clients.BalanceClient import BALANCE_CLIENT
 
     data = await BALANCE_CLIENT.get_enriched_wallet_balances(
