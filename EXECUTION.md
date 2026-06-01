@@ -73,7 +73,7 @@ Direct client calls without the internal secret return `403`.
 
 ## Running the Sidecar (local & prod)
 
-The sidecar is a Vercel Python function (`api/wayfinder/execute.py`). It needs `WAYFINDER_API_KEY` for the SDK's balance/quote calls; with no `config.json` present it targets `https://wayfinder.ai/api`.
+The sidecar is a Vercel Python function (`api/wayfinder/execute.py`). It needs `WAYFINDER_API_KEY` for the SDK's balance/quote calls. In serverless environments that do not ship a `config.json`, Tilt sets the SDK API base to `https://strategies.wayfinder.ai/api/v1`; override it with `WAYFINDER_API_BASE_URL` only if Wayfinder moves the API host.
 
 - **`next dev`** does not serve Python functions, so `/api/wayfinder/execute` 404s ("Wayfinder sidecar route not found"). Either:
   - run `vercel dev` (serves the function locally — `vercel pull` first for env), or
@@ -123,6 +123,8 @@ Wayfinder receives that callback through `main_wallet_signing_callback` and `str
 | `PRIVY_APP_SECRET` | Server-side Privy auth and fallback sidecar secret |
 | `WAYFINDER_INTERNAL_SECRET` | Optional explicit Next.js -> sidecar shared secret |
 | `WAYFINDER_SIDECAR_URL` | Optional override for the Python sidecar URL in local development |
+| `WAYFINDER_API_KEY` | Required by the Python sidecar for Wayfinder balance/quote API calls |
+| `WAYFINDER_API_BASE_URL` | Optional Wayfinder SDK API host override; defaults to `https://strategies.wayfinder.ai/api/v1` |
 | `KV_REST_API_URL` | Vercel KV / Upstash Redis REST URL for persistent server-wallet mappings |
 | `KV_REST_API_TOKEN` | Vercel KV / Upstash Redis REST token |
 | `SERVER_WALLET_REGISTRY_PREFIX` | Optional Redis key prefix for server-wallet mappings |
