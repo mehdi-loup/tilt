@@ -6,4 +6,11 @@ out/
 *.tsbuildinfo
 .DS_Store
 
+# Python sidecar bytecode
+__pycache__/
+*.pyc
+
+# Local Claude Code agent config
+.claude/
+
 certificates

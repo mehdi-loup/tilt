@@ -11,7 +11,7 @@ Base-only strategy steps are wired for `stablecoin_yield_strategy` and `moonwell
 ## Architecture
 
 ```
-Browser / Privy embedded wallet
+Browser / connected wallet (external preferred, else Privy embedded)
   └─ signs the Wayfinder-built funding transactions (+ a Base ETH gas float)
 
 Next.js API
@@ -23,8 +23,8 @@ Next.js API
 Vercel KV / Upstash Redis
   └─ persists userId → Privy server-wallet mapping
 
-Python sidecar
-  └─ /api/wayfinder/execute
+Python sidecar — Cloud Run (service tilt-wayfinder), reached via WAYFINDER_SIDECAR_URL
+  └─ /api/wayfinder/execute   (wayfinder-paths deps too heavy for a Vercel function)
       ├─ protected by x-tilt-internal-secret
       ├─ wraps Privy wallet RPC as a Wayfinder signing callback
       ├─ operation=fund mode=plan    → Wayfinder builds unsigned funding txs
@@ -73,12 +73,14 @@ Direct client calls without the internal secret return `403`.
 
 ## Running the Sidecar (local & prod)
 
-The sidecar is a Vercel Python function (`api/wayfinder/execute.py`). It needs `WAYFINDER_API_KEY` for the SDK's balance/quote calls. In serverless environments that do not ship a `config.json`, Tilt sets the SDK API base to `https://strategies.wayfinder.ai/api/v1`; override it with `WAYFINDER_API_BASE_URL` only if Wayfinder moves the API host.
+The sidecar (`api/wayfinder/execute.py`) runs on **Cloud Run** (service `tilt-wayfinder`, project `project-e1f51a28-…`, region `us-east1`), not as a Vercel function — the wayfinder-paths dependency tree (web3/pandas/numpy/ccxt/…) is too heavy for a Vercel Lambda (it 502s on "Installing runtime dependencies"). It's a container (`Dockerfile` + `server.py` = `ThreadingHTTPServer` around the `handler`). The Next app reaches it via the `WAYFINDER_SIDECAR_URL` env var (set in Vercel Production + Preview). Deploy with `gcloud run deploy --source api/wayfinder`.
 
-- **`next dev`** does not serve Python functions, so `/api/wayfinder/execute` 404s ("Wayfinder sidecar route not found"). Either:
-  - run `vercel dev` (serves the function locally — `vercel pull` first for env), or
-  - keep `next dev` and set `WAYFINDER_SIDECAR_URL` to a deployed sidecar (e.g. `https://tilt-hazel.vercel.app/api/wayfinder/execute`); the local `PRIVY_APP_SECRET`/`WAYFINDER_INTERNAL_SECRET` must match the deployment's.
-- **Production**: the Next routes self-fetch `${origin}/api/wayfinder/execute`, so open the app on the **public** domain (`tilt-hazel.vercel.app`). On a deployment-protected URL (the `*-projects.vercel.app` git/preview aliases) that self-fetch hits the 401 auth wall and the sidecar appears unreachable.
+It needs `WAYFINDER_API_KEY` for the SDK's balance/quote calls; with no `config.json` present, `execute.py` sets the SDK API base to `https://strategies.wayfinder.ai/api/v1` (override with `WAYFINDER_API_BASE_URL`). Secrets are set directly on Cloud Run (`gcloud run services update --update-env-vars`) — Vercel's Sensitive env vars can't be read back via `vercel env pull`.
+
+Gotchas:
+- The Privy JWT is forwarded as the `x-tilt-user-jwt` header, **not** `Authorization` — Cloud Run intercepts `Authorization: Bearer` as Google IAM auth and 401s non-Google tokens.
+- **`next dev`** doesn't serve the Python function, so set `WAYFINDER_SIDECAR_URL` in `.env.local` to the Cloud Run URL (local `PRIVY_APP_SECRET`/`WAYFINDER_INTERNAL_SECRET` must match the sidecar's).
+- The Vercel Python function at `/api/wayfinder/execute` still builds as an unused fallback; the live path is Cloud Run via `WAYFINDER_SIDECAR_URL`.
 
 ## Privy Signing Adapter
 
