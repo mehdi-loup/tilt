@@ -41,7 +41,11 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
   const { createWallet } = useCreateWallet();
   const { sendTransaction } = useSendTransaction();
 
-  const embedded = wallets.find((w) => w.walletClientType === "privy");
+  // Funding source = the wallet the user connected. Prefer an external wallet
+  // (where they actually hold funds); fall back to the Privy embedded wallet.
+  const fundingWallet =
+    wallets.find((w) => w.walletClientType !== "privy") ??
+    wallets.find((w) => w.walletClientType === "privy");
   const [amount, setAmount] = useState(0);
   const [investableUsd, setInvestableUsd] = useState<number | null>(null);
   const [balanceErr, setBalanceErr] = useState<string | null>(null);
@@ -65,7 +69,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
 
   // Ask Wayfinder how much the wallet can invest, for the amount presets.
   useEffect(() => {
-    if (!embedded || !authenticated) {
+    if (!fundingWallet || !authenticated) {
       setInvestableUsd(null);
       setBalanceErr(null);
       setBalanceLoading(false);
@@ -80,7 +84,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
         const res = await fetch("/api/plan/balance", {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
-          body: JSON.stringify({ embeddedWalletAddress: embedded.address }),
+          body: JSON.stringify({ embeddedWalletAddress: fundingWallet.address }),
         });
         const body = (await res.json().catch(() => ({}))) as {
           investableUsd?: number | null;
@@ -103,10 +107,10 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [embedded, authenticated, getAccessToken]);
+  }, [fundingWallet, authenticated, getAccessToken]);
 
   const buildPlan = useCallback(async () => {
-    if (!embedded || !authenticated) return;
+    if (!fundingWallet || !authenticated) return;
     setBuilding(true);
     setPlanErr(null);
     setQuoteWarning(null);
@@ -119,7 +123,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
         body: JSON.stringify({
           risk,
           amountUsd: amount,
-          embeddedWalletAddress: embedded.address,
+          embeddedWalletAddress: fundingWallet.address,
         }),
       });
       if (!res.ok) {
@@ -137,7 +141,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
     } finally {
       setBuilding(false);
     }
-  }, [amount, authenticated, embedded, getAccessToken, risk]);
+  }, [amount, authenticated, fundingWallet, getAccessToken, risk]);
 
   const createEmbeddedWallet = useCallback(async () => {
     if (!authenticated) {
@@ -157,32 +161,43 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
 
   const runFundStep = useCallback(
     async (step: PlanStep): Promise<StepState> => {
-      if (!embedded) throw new Error("no embedded wallet");
+      if (!fundingWallet) throw new Error("no funding wallet");
       if (!step.tx) throw new Error("fund step missing pre-built tx");
       // Cross-chain bridge legs settle on Base asynchronously; gate the final
       // transfer on the bridged USDC actually arriving before we sign it.
       if (step.tx.waitForUsdc) {
-        await waitForBaseUsdc(embedded.address, BigInt(step.tx.waitForUsdc));
+        await waitForBaseUsdc(fundingWallet.address, BigInt(step.tx.waitForUsdc));
       }
-      const { hash } = await sendTransaction(
-        {
-          from: embedded.address,
-          to: step.tx.to,
-          data: step.tx.data,
-          value: step.tx.value,
-          chainId: step.tx.chainId,
-        },
-        { address: embedded.address },
-      );
+      const txReq = {
+        from: fundingWallet.address,
+        to: step.tx.to,
+        data: step.tx.data,
+        value: step.tx.value,
+      };
+      let hash: string;
+      if (fundingWallet.walletClientType === "privy") {
+        ({ hash } = await sendTransaction(
+          { ...txReq, chainId: step.tx.chainId },
+          { address: fundingWallet.address },
+        ));
+      } else {
+        // External wallet signs via its own provider.
+        await fundingWallet.switchChain(step.tx.chainId);
+        const provider = await fundingWallet.getEthereumProvider();
+        hash = (await provider.request({
+          method: "eth_sendTransaction",
+          params: [txReq],
+        })) as string;
+      }
       await waitForReceipt(hash, step.tx.chainId);
       return { status: "success", txHashes: [hash] };
     },
-    [embedded, sendTransaction],
+    [fundingWallet, sendTransaction],
   );
 
   const runServerStep = useCallback(
     async (step: PlanStep): Promise<StepState> => {
-      if (!embedded) throw new Error("no embedded wallet");
+      if (!fundingWallet) throw new Error("no funding wallet");
       const jwt = await getAccessToken();
       const res = await fetch("/api/plan/execute-step", {
         method: "POST",
@@ -191,7 +206,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
           stepId: step.id,
           risk,
           amountUsd: amount,
-          embeddedWalletAddress: embedded.address,
+          embeddedWalletAddress: fundingWallet.address,
         }),
       });
       const body = (await res.json().catch(() => ({}))) as {
@@ -205,7 +220,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
       if (body.source !== "live") return { status: "stub", note: body.note };
       return { status: "success", txHashes: body.txHashes ?? [] };
     },
-    [amount, embedded, getAccessToken, risk],
+    [amount, fundingWallet, getAccessToken, risk],
   );
 
   const runPlan = useCallback(async () => {
@@ -258,11 +273,11 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
           ? `AMOUNT EXCEEDS INVESTABLE BALANCE ($${investableUsd?.toFixed(2)})`
           : "PLAN PREVIEW ONLY · STRATEGY COMPOSITION NOT YET EXECUTABLE";
 
-  if (!authenticated || !embedded) {
-    const title = authenticated ? "CREATE EMBEDDED WALLET" : "CONNECT WALLET";
+  if (!authenticated || !fundingWallet) {
+    const title = authenticated ? "CREATE WALLET" : "CONNECT WALLET";
     const copy = authenticated
-      ? "Create your Privy embedded wallet first. Funding transactions must be signed by that wallet, not an external connected wallet."
-      : "Connect your wallet first. Tilt will create a Privy embedded wallet for funding signatures.";
+      ? "No wallet found. Create a Privy embedded wallet to fund from, or reconnect an external wallet."
+      : "Connect your wallet first. Funding is sourced from and signed by the wallet you connect.";
     return (
       <Backdrop onClose={onClose}>
         <Panel>
