@@ -428,9 +428,14 @@ def make_privy_sign_callback(
                 headers={"privy-app-id": PRIVY_APP_ID},
                 auth=auth,
                 json={
+                    # No `caip2` at the root for eth_signTransaction — Privy
+                    # rejects it; the chain comes from transaction.chain_id.
                     "method": "eth_signTransaction",
-                    "caip2": caip2,
-                    "params": {"transaction": _prepare_tx_for_privy(transaction)},
+                    "params": {
+                        "transaction": _prepare_tx_for_privy(
+                            transaction, _caip2_chain_id(caip2)
+                        ),
+                    },
                 },
             )
         if resp.status_code >= 400:
@@ -448,15 +453,14 @@ def make_privy_sign_callback(
     return sign_callback
 
 
-def _prepare_tx_for_privy(tx: dict) -> dict:
-    """Coerce a Wayfinder transaction dict into Privy's wallet-RPC shape.
-
-    Wayfinder hands us integer fields (chainId, value, gas, etc.). Privy's
-    RPC accepts hex strings for numerics. We pass `to`, `data`, `from`,
-    `value`, `gas`, `nonce`, `chainId`, and the 1559 fields if present.
+def _prepare_tx_for_privy(tx: dict, default_chain_id: int) -> dict:
+    """Coerce a Wayfinder (web3, camelCase) tx into Privy's eth_signTransaction
+    shape. Privy wants snake_case fields and a required integer `chain_id`; it
+    rejects the camelCase keys (gas, chainId, maxFeePerGas, maxPriorityFeePerGas).
+    `to`, `from`, `value`, `data`, `nonce`, `type` are accepted as-is.
     """
 
-    def hex_or_none(v: Any) -> str | None:
+    def hexify(v: Any) -> str | None:
         if v is None:
             return None
         if isinstance(v, str):
@@ -465,19 +469,40 @@ def _prepare_tx_for_privy(tx: dict) -> dict:
             return hex(int(v))
         return v
 
-    out = {
-        "from": tx.get("from"),
-        "to": tx.get("to"),
-        "data": tx.get("data"),
+    def as_int(v: Any) -> int:
+        if isinstance(v, str):
+            return int(v, 16) if v.startswith("0x") else int(v)
+        return int(v)
+
+    out: dict[str, Any] = {}
+    for k in ("from", "to", "data"):
+        if tx.get(k) is not None:
+            out[k] = tx[k]
+    # Numeric fields → hex, renamed to Privy's snake_case where it differs.
+    rename = {
+        "value": "value",
+        "nonce": "nonce",
+        "gas": "gas_limit",
+        "gasLimit": "gas_limit",
+        "gasPrice": "gas_price",
+        "maxFeePerGas": "max_fee_per_gas",
+        "maxPriorityFeePerGas": "max_priority_fee_per_gas",
     }
-    for k in ("value", "gas", "gasLimit", "nonce", "chainId", "gasPrice",
-              "maxFeePerGas", "maxPriorityFeePerGas", "type"):
-        v = hex_or_none(tx.get(k))
+    for src, dst in rename.items():
+        v = hexify(tx.get(src))
         if v is not None:
-            out[k] = v
-    if "gasLimit" in out and "gas" not in out:
-        out["gas"] = out.pop("gasLimit")
-    return {k: v for k, v in out.items() if v is not None}
+            out[dst] = v
+    # chain_id is required and must be an integer.
+    out["chain_id"] = as_int(tx.get("chainId") or tx.get("chain_id") or default_chain_id)
+    # Transaction type (0 legacy, 2 EIP-1559) as an int when known.
+    t = tx.get("type")
+    if t is None and "maxFeePerGas" in tx:
+        t = 2
+    elif t is None and "gasPrice" in tx:
+        t = 0
+    if t is not None:
+        out["type"] = as_int(t)
+    return out
 
 
 # ─── Strategy invocation ─────────────────────────────────────────────────
