@@ -255,10 +255,17 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
     });
   }, [plan, steps]);
 
-  // Wayfinder builds the funding legs; they're ready once the plan carries
-  // at least one signable funding tx (id `fund-N`, distinct from fund-gas).
-  const fundReady = !!plan?.steps.some((s) => /^fund-\d+$/.test(s.id) && s.tx);
-  const overBalance = investableUsd !== null && amount > investableUsd;
+  // The funding plan is ready when the build returned an executable plan with
+  // no funding error. Funding steps may legitimately be absent — the server
+  // wallet can already hold the amount + gas (the build funds only the
+  // shortfall). Only a quoteWarning means Wayfinder couldn't build the route.
+  const fundReady = !!plan?.executable && !quoteWarning;
+  // overBalance only applies when the connected wallet actually sources USDC
+  // (fund-N legs). If the server wallet already covers the amount, there's
+  // nothing to draw from the connected wallet, so its balance is irrelevant.
+  const needsConnectedFunding = !!plan?.steps.some((s) => /^fund-\d+$/.test(s.id));
+  const overBalance =
+    needsConnectedFunding && investableUsd !== null && amount > investableUsd;
   const canExecute =
     !!plan &&
     plan.executable &&
