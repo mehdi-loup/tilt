@@ -527,6 +527,10 @@ async def run_strategy(
         strategy_wallet_signing_callback=sign_callback,
     )
 
+    # setup() loads token/pool info (e.g. usdc_token_info) and must run before
+    # deposit() — otherwise deposit raises AttributeError on those fields.
+    await strategy.setup()
+
     lifecycle: dict[str, Any] = {
         "deposit": _serialize_status(
             await strategy.deposit(main_token_amount=amount_usd)

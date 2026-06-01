@@ -227,6 +227,9 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
     if (!plan) return;
     setRunning(true);
     for (const step of plan.steps) {
+      // Don't re-run steps that already succeeded (e.g. retrying after a later
+      // step failed) — the funding txs have already moved funds on-chain.
+      if (steps[step.id]?.status === "success") continue;
       setSteps((s) => ({ ...s, [step.id]: { status: "running" } }));
       try {
         const next: StepState =
@@ -242,7 +245,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
       }
     }
     setRunning(false);
-  }, [plan, runFundStep, runServerStep]);
+  }, [plan, steps, runFundStep, runServerStep]);
 
   const allDone = useMemo(() => {
     if (!plan) return false;
