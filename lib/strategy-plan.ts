@@ -3,7 +3,7 @@
 // A Plan is a sequence of Steps that, when run in order, deploys the
 // user's chosen risk profile by handing off to Wayfinder strategies.
 //
-//   - `fund`     — user signs from their embedded wallet. The funding
+//   - `fund`     — user signs from their connected funding wallet. The funding
 //                  transactions are PLANNED AND BUILT BY WAYFINDER: it
 //                  figures out how to move the user's holdings into the
 //                  server wallet as USDC on Base (swaps/bridges as needed).
@@ -41,7 +41,7 @@ export interface ClientTx {
   /** Optional human label Wayfinder attaches to this leg. */
   label?: string;
   /** Present on the final transfer when a cross-chain bridge fed it: the
-   * embedded wallet's Base USDC balance (base units, string) must reach this
+   * funding wallet's Base USDC balance (base units, string) must reach this
    * before the client signs the transfer, since bridged USDC lands on Base
    * asynchronously after the source-chain swap confirms. */
   waitForUsdc?: string;
@@ -67,7 +67,7 @@ export interface PlanStep {
   amountUsd?: number;
   /** Wayfinder strategy name (only for strategy steps). */
   strategyName?: string;
-  /** Pre-encoded tx for embedded-signed steps. Absent for server steps. */
+  /** Pre-encoded tx for client-signed funding steps. Absent for server steps. */
   tx?: ClientTx;
 }
 
@@ -89,7 +89,7 @@ interface BuildArgs {
   amountUsd: number;
   embeddedWalletAddress: string;
   serverWalletAddress: string;
-  /** Wayfinder-planned funding transactions (the embedded wallet signs
+  /** Wayfinder-planned funding transactions (the connected funding wallet signs
    * these) that move the user's holdings into the server wallet as USDC on
    * Base. Absent during server-side re-derivation, where only strategy
    * steps matter — those legs are emitted without a signable tx. */

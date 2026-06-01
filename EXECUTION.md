@@ -34,7 +34,7 @@ Python sidecar — Cloud Run (service tilt-wayfinder), reached via WAYFINDER_SID
 
 ## Wallets
 
-- **Embedded wallet**: user-controlled Privy wallet. It holds the user's funds and signs the Wayfinder-built funding transactions.
+- **Funding wallet**: the user-controlled wallet that signs funding transactions. The modal prefers an external connected wallet and falls back to the Privy embedded wallet.
 - **Server wallet**: app-owned Privy wallet provisioned per user. Wayfinder delivers USDC to it, then drives it for strategy deposits through the Privy signing adapter.
 
 `lib/wallet-registry.ts` persists `userId -> walletId` through Vercel KV / Upstash Redis when `KV_REST_API_URL` + `KV_REST_API_TOKEN` are configured. Local development falls back to an in-process map if KV is missing; production fails closed instead of silently using ephemeral storage.
@@ -54,8 +54,8 @@ Python sidecar — Cloud Run (service tilt-wayfinder), reached via WAYFINDER_SID
    returns without funding txs and the modal blocks execution.
 5. If `plan.executable === false`, the modal shows preview-only steps and no execute button.
 6. If executable, the modal walks steps in order:
-   - `fund-gas`: embedded wallet sends a `0.001` Base ETH gas float to the server wallet.
-   - `fund-N`: embedded wallet signs each Wayfinder-built funding tx (swaps/
+   - `fund-gas`: funding wallet sends a `0.001` Base ETH gas float to the server wallet.
+   - `fund-N`: funding wallet signs each Wayfinder-built funding tx (swaps/
      bridges that deliver USDC to the server wallet). Receipt-polled in turn.
    - `strategy-*`: Next.js calls the Python sidecar with the concrete `strategyName` to run Wayfinder.
 7. Sidecar runs Wayfinder and returns `{ source: "live", txHashes, status }`.
@@ -67,20 +67,20 @@ The Stable Lender strategy was validated against the real `wayfinder-paths` SDK:
 `POST /api/wayfinder/execute` is not public API. It requires:
 
 - `x-tilt-internal-secret`: shared internal secret. Uses `WAYFINDER_INTERNAL_SECRET` if set; otherwise falls back to `PRIVY_APP_SECRET`.
-- `Authorization: Bearer <privy-user-access-token>`: forwarded by the authenticated Next.js route.
+- `x-tilt-user-jwt`: forwarded Privy user access token. Cloud Run intercepts `Authorization: Bearer` as Google IAM auth, so the user JWT uses this custom header.
 
 Direct client calls without the internal secret return `403`.
 
 ## Running the Sidecar (local & prod)
 
-The sidecar (`api/wayfinder/execute.py`) runs on **Cloud Run** (service `tilt-wayfinder`, project `project-e1f51a28-…`, region `us-east1`), not as a Vercel function — the wayfinder-paths dependency tree (web3/pandas/numpy/ccxt/…) is too heavy for a Vercel Lambda (it 502s on "Installing runtime dependencies"). It's a container (`Dockerfile` + `server.py` = `ThreadingHTTPServer` around the `handler`). The Next app reaches it via the `WAYFINDER_SIDECAR_URL` env var (set in Vercel Production + Preview). Deploy with `gcloud run deploy --source api/wayfinder`.
+The sidecar (`api/wayfinder/execute.py`) runs on **Cloud Run** (service `tilt-wayfinder`, project `project-e1f51a28-…`, region `us-east1`), not as a Vercel function — the wayfinder-paths dependency tree (web3/pandas/numpy/ccxt/…) is too heavy for a Vercel Lambda (it 502s on "Installing runtime dependencies"). It's a container (`Dockerfile` + `server.py` = `ThreadingHTTPServer` around the `handler`). The Next app reaches it via the `WAYFINDER_SIDECAR_URL` env var, which is required in Vercel Production and Preview. Deploy with `gcloud run deploy --source api/wayfinder`.
 
 It needs `WAYFINDER_API_KEY` for the SDK's balance/quote calls; with no `config.json` present, `execute.py` sets the SDK API base to `https://strategies.wayfinder.ai/api/v1` (override with `WAYFINDER_API_BASE_URL`). Secrets are set directly on Cloud Run (`gcloud run services update --update-env-vars`) — Vercel's Sensitive env vars can't be read back via `vercel env pull`.
 
 Gotchas:
 - The Privy JWT is forwarded as the `x-tilt-user-jwt` header, **not** `Authorization` — Cloud Run intercepts `Authorization: Bearer` as Google IAM auth and 401s non-Google tokens.
 - **`next dev`** doesn't serve the Python function, so set `WAYFINDER_SIDECAR_URL` in `.env.local` to the Cloud Run URL (local `PRIVY_APP_SECRET`/`WAYFINDER_INTERNAL_SECRET` must match the sidecar's).
-- The Vercel Python function at `/api/wayfinder/execute` still builds as an unused fallback; the live path is Cloud Run via `WAYFINDER_SIDECAR_URL`.
+- `.vercelignore` excludes `api/wayfinder/` so Vercel does not build the heavy Python function. Without `WAYFINDER_SIDECAR_URL`, production plan/balance calls fail closed with a configuration error.
 
 ## Privy Signing Adapter
 
@@ -124,7 +124,7 @@ Wayfinder receives that callback through `main_wallet_signing_callback` and `str
 | `NEXT_PUBLIC_PRIVY_APP_ID` | Client-side Privy app id |
 | `PRIVY_APP_SECRET` | Server-side Privy auth and fallback sidecar secret |
 | `WAYFINDER_INTERNAL_SECRET` | Optional explicit Next.js -> sidecar shared secret |
-| `WAYFINDER_SIDECAR_URL` | Optional override for the Python sidecar URL in local development |
+| `WAYFINDER_SIDECAR_URL` | Required in Vercel production/preview; Cloud Run sidecar URL |
 | `WAYFINDER_API_KEY` | Required by the Python sidecar for Wayfinder balance/quote API calls |
 | `WAYFINDER_API_BASE_URL` | Optional Wayfinder SDK API host override; defaults to `https://strategies.wayfinder.ai/api/v1` |
 | `KV_REST_API_URL` | Vercel KV / Upstash Redis REST URL for persistent server-wallet mappings |
@@ -137,7 +137,7 @@ Privy dashboard requirement: server wallet creation must be enabled for the app 
 
 1. **Run funded Stable Lender live transaction**
    - Preflight is automated by `scripts/stable_lender_deploy_test.py`.
-   - Live mode still needs a Privy server wallet funded with Base USDC and at least `0.001` Base ETH.
+   - Live app mode needs a connected funding wallet with routeable assets and enough Base ETH for the gas float; the server wallet receives Base USDC and `0.001` Base ETH before strategy execution.
    - Run with risk `0-20`, amount `>= $2`, and confirm `deposit()` + `update()` both return success.
 
 2. **Strategy receipt polling**
@@ -155,15 +155,15 @@ Privy dashboard requirement: server wallet creation must be enabled for the app 
 
 ```bash
 pnpm build
-python3.12 -m py_compile api/wayfinder/execute.py scripts/stable_lender_deploy_test.py
+python3.12 -m py_compile api/wayfinder/execute.py api/wayfinder/server.py scripts/stable_lender_deploy_test.py
 PYTHONPATH=/private/tmp/tilt-wayfinder-deploytest python3.12 scripts/stable_lender_deploy_test.py
 ```
 
 `pnpm lint` currently prompts for Next.js ESLint setup and is not non-interactive yet.
 
-`GET /api/wayfinder/execute` reports sidecar health and whether `wayfinder_paths` is importable in that Python runtime.
+`GET $WAYFINDER_SIDECAR_URL` reports sidecar health and whether `wayfinder_paths` is importable in that Python runtime.
 
-When running with `pnpm dev`, only the Next.js app routes are served. The Vercel Python sidecar at `api/wayfinder/execute.py` must be served by Vercel dev/deploy or by setting `WAYFINDER_SIDECAR_URL` to a separately running sidecar; otherwise `/api/plan/balance` will report a sidecar 404.
+When running with `pnpm dev`, only the Next.js app routes are served. Set `WAYFINDER_SIDECAR_URL` to the Cloud Run sidecar or a separately running local sidecar; otherwise `/api/plan/balance` will report a sidecar 404 in development. Production requires the env var and fails closed when it is missing.
 
 ## Stable Lender Deploy Test
 

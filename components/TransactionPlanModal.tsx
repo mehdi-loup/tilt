@@ -24,7 +24,7 @@ type StepRuntimeStatus = "idle" | "running" | "success" | "stub" | "error";
 
 interface StepState {
   status: StepRuntimeStatus;
-  /** One hash for fund step (embedded signer). Multiple for strategy steps. */
+  /** One hash for a funding step. Multiple hashes for strategy steps. */
   txHashes?: string[];
   error?: string;
   note?: string;
@@ -881,7 +881,7 @@ async function waitForReceipt(hash: string, chainId: number): Promise<void> {
   throw new Error("funding transaction was not confirmed in time");
 }
 
-/** Poll the embedded wallet's Base USDC balance until it covers `units`, so a
+/** Poll the funding wallet's Base USDC balance until it covers `units`, so a
  * bridge-fed transfer isn't signed before the USDC has landed. Bridges can take
  * minutes, hence the long ceiling. */
 async function waitForBaseUsdc(address: string, units: bigint): Promise<void> {

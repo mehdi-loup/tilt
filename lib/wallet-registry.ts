@@ -2,7 +2,7 @@
 //
 // For each authed Privy user, we provision one app-owned Privy server wallet
 // and reuse it for all subsequent strategy execution. The user funds this
-// wallet from their embedded wallet; Wayfinder / our server then drives the
+// wallet from their connected funding wallet; Wayfinder / our server then drives the
 // wallet to deploy the strategy.
 //
 // Production persistence is backed by Upstash/Vercel KV's Redis REST API.

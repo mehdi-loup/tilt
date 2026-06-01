@@ -1,4 +1,4 @@
-// Thin client for the Wayfinder Python sidecar at /api/wayfinder/execute.
+// Thin client for the Wayfinder Python sidecar.
 //
 // Both the plan-build route (convert quote) and the execute-step route
 // (convert + strategy execution) call the sidecar, so the origin + auth +
@@ -15,7 +15,7 @@ export interface WayfinderResult {
   note?: string;
   error?: string;
   status?: unknown;
-  // fund-plan: Wayfinder-built funding transactions for the embedded wallet
+  // fund-plan: Wayfinder-built funding transactions for the connected wallet
   txs?: { to: string; data: string; value: string; chainId: number; label?: string }[];
   // fund-balance: total investable USD value Wayfinder sees in the wallet
   investableUsd?: number;
@@ -27,13 +27,15 @@ export function wayfinderInternalSecret(): string | undefined {
 }
 
 function wayfinderSidecarUrl(origin: string): string {
-  return process.env.WAYFINDER_SIDECAR_URL ?? `${origin}/api/wayfinder/execute`;
+  const configured = process.env.WAYFINDER_SIDECAR_URL?.trim();
+  if (configured) return configured;
+  return `${origin}/api/wayfinder/execute`;
 }
 
 /**
- * POST to the colocated Python sidecar. `origin` comes from the inbound
- * request URL; `jwt` is the user's verified Privy access token, forwarded
- * so the sidecar can re-check auth.
+ * POST to the Python sidecar. Production deployments must provide
+ * WAYFINDER_SIDECAR_URL for the Cloud Run service; the same-origin fallback is
+ * only for local/dev setups that explicitly serve api/wayfinder/execute.py.
  */
 export async function callWayfinder(
   origin: string,
@@ -50,6 +52,18 @@ export async function callWayfinder(
   }
   let res: Response;
   const url = wayfinderSidecarUrl(origin);
+  if (!process.env.WAYFINDER_SIDECAR_URL?.trim() && process.env.NODE_ENV === "production") {
+    return {
+      ok: false,
+      status: 503,
+      payload: {
+        ok: false,
+        source: "error",
+        error:
+          "WAYFINDER_SIDECAR_URL is required in production. Deploy the Cloud Run sidecar and set its URL in Vercel.",
+      },
+    };
+  }
   try {
     res = await fetch(url, {
       method: "POST",
@@ -82,7 +96,7 @@ export async function callWayfinder(
         ok: false,
         source: "error",
         error:
-          "Wayfinder sidecar route not found. Use Vercel dev/deploy for api/wayfinder/execute.py or set WAYFINDER_SIDECAR_URL.",
+          "Wayfinder sidecar route not found. Set WAYFINDER_SIDECAR_URL to the Cloud Run service URL.",
       },
     };
   }

@@ -1,4 +1,4 @@
-"""Vercel Python serverless function — Wayfinder strategy executor.
+"""Cloud Run Python sidecar — Wayfinder strategy executor.
 
 Drives a Wayfinder strategy against the user's Privy server-side wallet.
 Wayfinder strategy classes accept a `*_signing_callback` parameter in
@@ -18,8 +18,9 @@ Request body (POST /api/wayfinder/execute):
 
 Auth:
   - x-tilt-internal-secret: shared Next.js → Python sidecar secret
-  - Authorization: Bearer <privy-user-access-token>  (forwarded from the
-    Next.js side after verifyAuthToken).
+  - x-tilt-user-jwt: Privy user access token forwarded from the Next.js side
+    after verifyAuthToken. Authorization is avoided because Cloud Run treats
+    Bearer tokens as Google IAM auth.
 """
 
 from __future__ import annotations
@@ -124,8 +125,8 @@ PROFILE_STRATEGIES: dict[str, dict[str, Any]] = {
 #     unsigned calldata to execute it.
 # A BRAP swap delivers its output to the *signing* wallet, so the route we
 # return ends with a plain USDC transfer that moves the requested amount from
-# the embedded wallet into the server wallet. Every leg is unsigned calldata
-# for the embedded wallet to sign client-side.
+# the funding wallet into the server wallet. Every leg is unsigned calldata
+# for the funding wallet to sign client-side.
 USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 USDC_DECIMALS = 6
 
@@ -147,12 +148,12 @@ SWAP_BUFFER = 1.01
 BASE_CHAIN_ID = 8453  # funding target (target_caip2 is always eip155:8453)
 
 # Off-Base native value (USD) to keep for gas on a source chain, so we don't
-# swap away the ETH/etc. the embedded wallet needs to pay for its approve/swap
+# swap away the ETH/etc. the funding wallet needs to pay for its approve/swap
 # there. Ethereum L1 gas is dear, so it reserves more.
 NATIVE_GAS_RESERVE_USD: dict[int, float] = {1: 20.0}
 DEFAULT_NATIVE_RESERVE_USD = 1.50
 
-# Base ETH the embedded wallet must keep — and never swap. This is a *raw* wei
+# Base ETH the funding wallet must keep — and never swap. This is a *raw* wei
 # amount, not USD: the first plan step sends a fixed 0.001 ETH gas float to the
 # server wallet (mirror GAS_FUNDING_WEI in lib/strategy-plan.ts), plus padding
 # for the wallet's own Base funding-tx gas. StablecoinYieldStrategy requires
@@ -334,7 +335,7 @@ class handler(BaseHTTPRequestHandler):
         # Primary: a custom header. Cloud Run intercepts `Authorization: Bearer`
         # and validates it as a Google IAM token (401s anything else), so the
         # Next layer forwards the Privy JWT here instead. Fall back to
-        # Authorization for the Vercel-native (colocated) path.
+        # Authorization only for local compatibility.
         jwt = self.headers.get("x-tilt-user-jwt", "").strip()
         if jwt:
             return jwt
@@ -598,7 +599,7 @@ def _is_native(b: dict[str, Any]) -> bool:
 
 
 def _gas_min_usd(chain_id: int) -> float:
-    """USD of native gas the embedded wallet must hold on a non-Base source
+    """USD of native gas the funding wallet must hold on a non-Base source
     chain to pay for its approve/swap there."""
     return NATIVE_GAS_RESERVE_USD.get(chain_id, DEFAULT_NATIVE_RESERVE_USD)
 
@@ -634,7 +635,7 @@ def _native_usd_by_chain(balances: list[dict[str, Any]]) -> dict[int, float]:
 
 
 def _base_gas_ok(balances: list[dict[str, Any]]) -> bool:
-    """Does the embedded wallet hold enough raw Base ETH for the gas float plus
+    """Does the funding wallet hold enough raw Base ETH for the gas float plus
     its own Base funding-tx gas? Gates the whole plan — without it the first
     step (and every Base leg) can't pay gas."""
     base_native_wei = sum(
@@ -695,7 +696,7 @@ async def plan_fund(
     amount_usd: float | None,
     target_caip2: str,
 ) -> dict[str, Any]:
-    """Build the unsigned txs that turn the embedded wallet's holdings into
+    """Build the unsigned txs that turn the funding wallet's holdings into
     `target_usdc_units` of USDC on Base and deliver them to the server wallet.
 
     Sources span every bridgeable chain — BRAP quotes a same-chain swap or a
@@ -718,7 +719,7 @@ async def plan_fund(
         return {
             "mode": "plan",
             "txs": [],
-            "error": "embedded wallet needs Base ETH to pay gas",
+            "error": "funding wallet needs Base ETH to pay gas",
         }
 
     def is_base_usdc(b: dict[str, Any]) -> bool:
@@ -819,7 +820,7 @@ async def plan_fund(
     # Final leg: hand the requested USDC to the server wallet (on Base). When a
     # cross-chain bridge fed this, the USDC arrives on Base asynchronously — the
     # source-chain swap receipt does not mean it has landed. `waitForUsdc` tells
-    # the client to wait until the embedded wallet's Base USDC balance covers
+    # the client to wait until the funding wallet's Base USDC balance covers
     # the transfer before signing it, so the fixed-amount transfer can't revert.
     transfer = _tx(
         to=USDC_BASE,

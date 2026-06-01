@@ -1,6 +1,4 @@
-# Cloud Run-only sidecar artifacts. Excluded so Vercel doesn't build
-# api/wayfinder/server.py as a second (heavy) Python function. The sidecar
-# runs on Cloud Run; the app reaches it via WAYFINDER_SIDECAR_URL.
-api/wayfinder/server.py
-api/wayfinder/Dockerfile
-api/wayfinder/.gcloudignore
+# Cloud Run-only sidecar. Keep the heavy Python function out of Vercel
+# entirely; the Next.js app reaches the deployed service via
+# WAYFINDER_SIDECAR_URL.
+api/wayfinder/

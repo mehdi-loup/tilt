@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
  * Returns the structured Plan for the user's risk profile. For executable
  * profiles it asks the Wayfinder sidecar to PLAN AND BUILD the funding
  * transaction(s) that move the user's holdings into the server wallet as
- * USDC on Base. The embedded wallet signs those built txs.
+ * USDC on Base. The connected funding wallet signs those built txs.
  */
 export async function POST(req: Request) {
   const user = await authenticate(req);
@@ -60,8 +60,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ plan: preview, serverWallet: wallet });
   }
 
-  // Ask Wayfinder to plan + build the funding transactions: convert
-  // whatever the embedded wallet holds into the target USDC on Base and
+  // Ask Wayfinder to plan + build the funding transactions: convert whatever
+  // the connected funding wallet holds into the target USDC on Base and
   // deliver it to the server wallet.
   const origin = new URL(req.url).origin;
   const planned = await callWayfinder(origin, user.jwt, {

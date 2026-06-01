@@ -20,8 +20,8 @@ interface ExecuteStepRequest {
  * POST /api/plan/execute-step
  *
  * Server-side executor for a single plan step. Funding steps are signed by
- * the client (embedded wallet); `strategy` steps dispatch to the Wayfinder
- * Python sidecar at /api/wayfinder/execute.
+ * the client (connected funding wallet); `strategy` steps dispatch to the
+ * Wayfinder Python sidecar.
  */
 export async function POST(req: Request) {
   const user = await authenticate(req);
@@ -55,7 +55,7 @@ export async function POST(req: Request) {
   }
   if (step.signer !== "server") {
     return NextResponse.json(
-      { error: `step '${step.id}' is signed by the embedded wallet, not the server` },
+      { error: `step '${step.id}' is signed by the funding wallet, not the server` },
       { status: 400 },
     );
   }
