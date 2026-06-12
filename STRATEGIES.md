@@ -10,17 +10,22 @@ The dial maps a 0–100 risk score to one of five discrete profiles.
 
 | Risk band | Profile | Wayfinder strategies | Chain(s) | Status |
 | --- | --- | --- | --- | ---: |
-| 0–20 | Stable Lender | `stablecoin_yield_strategy` | Base | **LIVE** |
-| 21–40 | Conservative Yield | `stablecoin_yield_strategy` + `multi_vault_split_strategy` | Base + HyperEVM | PREVIEW |
-| 41–60 | Balanced DeFi | `stablecoin_yield_strategy` + `moonwell_wsteth_loop_strategy` + `multi_vault_split_strategy` | Base + HyperEVM | PREVIEW |
-| 61–80 | Aggressive Growth | `moonwell_wsteth_loop_strategy` + `basis_trading_strategy` + `projectx_thbill_usdc_strategy` | Base + Hyperliquid + HyperEVM | PREVIEW |
-| 81–100 | Max Speculation | `moonwell_wsteth_loop_strategy` + `basis_trading_strategy` + `boros_hype_strategy` | Multi-chain | PREVIEW |
+| 0–20 | Stable Lender | `stablecoin_yield_rotator` | Base | **LIVE** |
+| 21–40 | Conservative Yield | `stablecoin_yield_rotator` + `multi_vault_split_strategy` | Base + Arbitrum/HL | **LIVE** |
+| 41–60 | Balanced DeFi | `stablecoin_yield_rotator` + `moonwell_wsteth_loop_strategy` + `multi_vault_split_strategy` | Base + Arbitrum/HL | **LIVE** |
+| 61–80 | Aggressive Growth | `moonwell_wsteth_loop_strategy` + `basis_trading_strategy` + `projectx_thbill_usdc_strategy` | Base + Hyperliquid + HyperEVM | **LIVE** |
+| 81–100 | Max Speculation | `moonwell_wsteth_loop_strategy` + `basis_trading_strategy` + `boros_hype_strategy` | Multi-chain | **LIVE** |
+
+All profiles fund on Base only; for non-Base strategies the sidecar
+self-bridges the server wallet's Base USDC to the target chain (Arbitrum or
+HyperEVM, plus a native gas float) via BRAP before the strategy runs —
+signed by the same Privy server wallet, no user prompts.
 
 ## What Wayfinder strategies do
 
 | Strategy | Chain | What it actually does |
 | --- | --- | --- |
-| `stablecoin_yield_strategy` | Base | Scans Base DeFi pools (Aave, Morpho, etc.), supplies USDC to the highest-APY low-risk venue, rebalances when better opportunities emerge. |
+| `stablecoin_yield_rotator` | Base | Wayfinder *path* (vendored in `api/wayfinder/rotator/`): scans Aave V3, Morpho, Euler V2, and Moonwell with TVL/utilization/cap-headroom guards, lends USDC to the top-ranked venue; supports quote-gated rotation, status, and withdraw actions (deposit wired today). |
 | `multi_vault_split_strategy` | Multi-chain (HyperEVM core) | Diversifies USDC across HLP, Boros, and Avantis vaults. |
 | `moonwell_wsteth_loop_strategy` | Base | Levered wstETH carry — supplies wstETH on Moonwell, borrows USDC, swaps to wstETH, repeats. ETH-correlated yield. |
 | `basis_trading_strategy` | Hyperliquid | Delta-neutral funding-rate capture — long spot, short perp on Hyperliquid. |

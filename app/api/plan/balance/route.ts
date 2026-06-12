@@ -27,9 +27,7 @@ export async function POST(req: Request) {
   }
 
   const origin = new URL(req.url).origin;
-  const { ok, status, payload } = await callWayfinder(origin, user.jwt, {
-    operation: "fund",
-    mode: "balance",
+  const { ok, status, payload } = await callWayfinder(origin, user.jwt, "/fund/balance", {
     fromAddress: body.embeddedWalletAddress,
     caip2: FUNDING_CAIP2,
   });

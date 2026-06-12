@@ -1,8 +1,9 @@
 # Wayfinder sidecar
 
-Python serverless function colocated with the Next.js app. Vercel detects
-`api/wayfinder/execute.py` and deploys it as its own Fluid-Compute Python
-lambda. Same project, same domain, separate runtime.
+Python FastAPI service on Cloud Run (`api/wayfinder/`): `app.py` (routes) →
+`execute.py` (engine), `ledger.py` (Postgres job-status writes), `server.py`
+(uvicorn entry). Too heavy for a Vercel function; the Next.js app reaches it
+via `WAYFINDER_SIDECAR_URL`.
 
 ## What it is for
 
@@ -14,11 +15,14 @@ server-side so multi-step strategies don't require a wallet popup per step.
 
 ## Current status
 
-Stable Lender dispatches to Wayfinder's `stablecoin_yield_strategy` through
-the Privy signing callback in `api/wayfinder/execute.py`. The other four
-profiles are preview-only until bridging and composition are implemented.
+All seven strategies are wired: the `stablecoin_yield_rotator` path (vendored
+in `api/wayfinder/rotator/`), the two Base strategy classes, and the four
+multi-chain strategies (Arbitrum/HyperEVM/Hyperliquid), for which the engine
+self-bridges the server wallet's Base USDC to the target chain before
+deposit. Strategy runs are async jobs that write status to the Neon Postgres
+ledger.
 
-The POST endpoint is not public API. Next.js calls it with
+The POST endpoints are not public API. Next.js calls them with
 `x-tilt-internal-secret`; direct browser/client calls are rejected before any
 wallet id is trusted.
 
@@ -29,20 +33,22 @@ wallet id is trusted.
 | `WAYFINDER_API_KEY` | `wk_…` from strategies.wayfinder.ai. Required for Wayfinder's remote-wallet feature. |
 | `PRIVY_APP_SECRET` | Used by the Wayfinder→Privy adapter to authenticate signing requests. |
 | `PRIVY_APP_ID` | Same. |
-| `WAYFINDER_INTERNAL_SECRET` | Optional internal Next.js → sidecar shared secret. Falls back to `PRIVY_APP_SECRET`. |
+| `WAYFINDER_INTERNAL_SECRET` | **Required** internal Next.js → sidecar shared secret (no fallback). |
+| `DATABASE_URL` | Neon Postgres — job status writes. Unset → synchronous fallback (dev). |
 | `BASE_RPC_URL` | Base mainnet RPC (Alchemy/QuickNode). For now `https://mainnet.base.org`. |
 
 ## Deployment
 
-Vercel auto-deploys `api/wayfinder/execute.py` as a Python serverless function.
-Python deps come from `api/wayfinder/requirements.txt` (Vercel uses pip).
+Cloud Run: `gcloud run deploy tilt-wayfinder --source api/wayfinder`, with
+`--no-cpu-throttling` so background strategy jobs keep running after the
+response (see EXECUTION.md).
 
 Local invocation:
 
 ```bash
-curl -X POST https://tilt-hazel.vercel.app/api/wayfinder/execute \
+curl -X POST "$WAYFINDER_SIDECAR_URL/strategy/run" \
   -H "x-tilt-internal-secret: $WAYFINDER_INTERNAL_SECRET" \
-  -H "authorization: Bearer $PRIVY_USER_JWT" \
+  -H "x-tilt-user-jwt: $PRIVY_USER_JWT" \
   -H "content-type: application/json" \
-  -d '{"profileId":"stable_lender","walletId":"<wallet-id>","walletAddress":"0x...","amountUsd":250}'
+  -d '{"strategyName":"stablecoin_yield_rotator","walletId":"<wallet-id>","walletAddress":"0x...","amountUsd":250}'
 ```

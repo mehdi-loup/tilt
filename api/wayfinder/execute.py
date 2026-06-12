@@ -1,59 +1,29 @@
-"""Cloud Run Python sidecar — Wayfinder strategy executor.
+"""Wayfinder engine — strategy/funding logic for the Cloud Run sidecar.
 
-Drives a Wayfinder strategy against the user's Privy server-side wallet.
-Wayfinder strategy classes accept a `*_signing_callback` parameter in
-their constructor; we wrap Privy's signing API as that callback so the
-strategy code can do its multi-step deposit() without ever holding a
-private key.
+This module is the stateless "Wayfinder engine": it drives Wayfinder
+strategies and the rotator path against the user's Privy server-side wallet,
+plans funding routes, and reports investable balances. HTTP serving lives in
+`app.py` (FastAPI); this module deliberately has no HTTP or event-loop
+plumbing — FastAPI/uvicorn provides the single long-lived loop the SDK's
+module-level httpx clients need.
 
-Request body (POST /api/wayfinder/execute):
-    {
-      "profileId": "stable_lender",
-      "strategyName": "stablecoin_yield_strategy",
-      "amountUsd": 100,
-      "walletId":  "<privy-wallet-id>",
-      "walletAddress": "0x...",
-      "caip2": "eip155:8453"   # optional, defaults to Base
-    }
-
-Auth:
-  - x-tilt-internal-secret: shared Next.js → Python sidecar secret
-  - x-tilt-user-jwt: Privy user access token forwarded from the Next.js side
-    after verifyAuthToken. Authorization is avoided because Cloud Run treats
-    Bearer tokens as Google IAM auth.
+Strategy classes accept `*_signing_callback` constructor params; we wrap
+Privy's wallet RPC as those callbacks so multi-step deposit()/update() runs
+without ever holding a private key. Strategies that need funds on another
+chain (Arbitrum, HyperEVM) declare a `prepare` spec: the engine self-bridges
+the server wallet's Base USDC to the target chain via BRAP — signed by the
+same Privy wallet — before invoking the strategy.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import os
-import threading
 import traceback
-from http.server import BaseHTTPRequestHandler
 from typing import Any, Awaitable, Callable
-
-
-# One persistent event loop for the whole process, run in a background thread.
-# The Wayfinder SDK holds module-level httpx.AsyncClient singletons that bind to
-# the loop they first run on; `asyncio.run` per request closes that loop, so the
-# next request (on a warm Cloud Run instance / ThreadingHTTPServer thread) reused
-# a client on a dead loop → "Event loop is closed". Submitting every coroutine to
-# one long-lived loop keeps those clients valid across requests.
-_LOOP: asyncio.AbstractEventLoop | None = None
-_LOOP_LOCK = threading.Lock()
-
-
-def _run(coro: Awaitable[Any]) -> Any:
-    global _LOOP
-    if _LOOP is None or _LOOP.is_closed():
-        with _LOOP_LOCK:
-            if _LOOP is None or _LOOP.is_closed():
-                loop = asyncio.new_event_loop()
-                threading.Thread(target=loop.run_forever, daemon=True).start()
-                _LOOP = loop
-    return asyncio.run_coroutine_threadsafe(coro, _LOOP).result()
 
 # Privy HTTP basic auth
 PRIVY_API_BASE = os.environ.get("PRIVY_API_URL", "https://api.privy.io")
@@ -61,7 +31,8 @@ PRIVY_APP_ID = os.environ.get("PRIVY_APP_ID") or os.environ.get(
     "NEXT_PUBLIC_PRIVY_APP_ID", ""
 )
 PRIVY_APP_SECRET = os.environ.get("PRIVY_APP_SECRET", "")
-INTERNAL_SECRET = os.environ.get("WAYFINDER_INTERNAL_SECRET") or PRIVY_APP_SECRET
+# One secret, one purpose — no PRIVY_APP_SECRET fallback.
+INTERNAL_SECRET = os.environ.get("WAYFINDER_INTERNAL_SECRET", "")
 
 DEFAULT_CAIP2 = "eip155:8453"  # Base mainnet
 SDK_LEGACY_API_BASE_URL = "https://wayfinder.ai/api"
@@ -70,11 +41,29 @@ DEFAULT_WAYFINDER_API_BASE_URL = "https://strategies.wayfinder.ai/api/v1"
 
 # ─── Profile/step → Wayfinder strategy mapping ─────────────────────────────
 #
-# Wayfinder ships several strategies. The TypeScript planner sends the
-# concrete `strategyName` for each executable step; `PROFILE_STRATEGIES` keeps
-# backward compatibility for the single-step stable_lender profile and returns
-# honest stub notes for profiles that still need target-chain funding.
+# The TypeScript planner sends the concrete `strategyName` for each step.
+# `prepare` declares target-chain funding the engine must self-bridge from the
+# server wallet's Base USDC before the strategy runs (signed by the same Privy
+# wallet, no user prompts):
+#   chain_id          — where the strategy expects main-wallet funds
+#   usdc_token_id     — Wayfinder token id of the target-chain USDC
+#   native_float_wei  — native gas the wallet must hold on the target chain
+#   gas_swap_usd      — Base USDC to spend buying that native gas
+# `min_amount_usd` covers the strategy's own minimum plus prep costs
+# (gas swap + bridge fees), so the post-bridge deposit still clears it.
+ARBITRUM_CHAIN_ID = 42161
+HYPEREVM_CHAIN_ID = 999
+
 STRATEGY_SPECS: dict[str, dict[str, Any]] = {
+    "stablecoin_yield_rotator": {
+        # Wayfinder *path* (not a strategy class), vendored under rotator/.
+        # Its deposit action scans Base lending venues, re-checks the target
+        # market, gas-checks, and lends in one call — no separate update().
+        "kind": "path",
+        "chain": "base",
+        "caip2": "eip155:8453",
+        "min_amount_usd": 2.0,
+    },
     "stablecoin_yield_strategy": {
         "module": "wayfinder_paths.strategies.stablecoin_yield_strategy.strategy",
         "class_name": "StablecoinYieldStrategy",
@@ -94,25 +83,108 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
         # deposit() stages Base USDC/ETH; update() deploys to Moonwell.
         "run_update_after_deposit": True,
     },
+    "multi_vault_split_strategy": {
+        "module": "wayfinder_paths.strategies.multi_vault_split_strategy.strategy",
+        "class_name": "MultiVaultSplitStrategy",
+        "chain": "multi",
+        "caip2": "eip155:8453",
+        # Strategy minimum is $40 (Arbitrum USDC); headroom for prep costs.
+        "min_amount_usd": 45.0,
+        # deposit() ends with `return await self.update()` — no second pass.
+        "run_update_after_deposit": False,
+        "prepare": {
+            "chain_id": ARBITRUM_CHAIN_ID,
+            "usdc_token_id": "usd-coin-arbitrum",
+            "native_float_wei": 300_000_000_000_000,  # 0.0003 ETH
+            "gas_swap_usd": 2.5,
+        },
+    },
+    "basis_trading_strategy": {
+        "module": "wayfinder_paths.strategies.basis_trading_strategy.strategy",
+        "class_name": "BasisTradingStrategy",
+        "chain": "hyperliquid",
+        "caip2": "eip155:8453",
+        # Strategy minimum is $25 (Arbitrum USDC); headroom for prep costs.
+        "min_amount_usd": 30.0,
+        # deposit() stages Arbitrum USDC; update() bridges to Hyperliquid
+        # and opens the positions.
+        "run_update_after_deposit": True,
+        "prepare": {
+            "chain_id": ARBITRUM_CHAIN_ID,
+            "usdc_token_id": "usd-coin-arbitrum",
+            "native_float_wei": 300_000_000_000_000,  # 0.0003 ETH
+            "gas_swap_usd": 2.5,
+        },
+    },
+    "projectx_thbill_usdc_strategy": {
+        "module": "wayfinder_paths.strategies.projectx_thbill_usdc_strategy.strategy",
+        "class_name": "ProjectXTHBILLUSDCStrategy",
+        "chain": "hyperEVM",
+        "caip2": "eip155:8453",
+        # Strategy minimum is $5 (HyperEVM USDC); the HYPE gas swap is the
+        # dominant prep cost, hence the larger headroom.
+        "min_amount_usd": 15.0,
+        # deposit() opens/increases the LP position itself.
+        "run_update_after_deposit": False,
+        "prepare": {
+            "chain_id": HYPEREVM_CHAIN_ID,
+            "usdc_token_id": "usd-coin-hyperevm",
+            # GAS_THRESHOLD is 0.05 HYPE; keep a little above it.
+            "native_float_wei": 60_000_000_000_000_000,  # 0.06 HYPE
+            "gas_swap_usd": 6.0,
+        },
+    },
+    "boros_hype_strategy": {
+        "module": "wayfinder_paths.strategies.boros_hype_strategy.strategy",
+        "class_name": "BorosHypeStrategy",
+        "chain": "multi",
+        "caip2": "eip155:8453",
+        # Strategy minimum is $150 (Arbitrum USDC); headroom for prep costs.
+        "min_amount_usd": 160.0,
+        # deposit() stages funds; update() runs the OPA loop and deploys.
+        "run_update_after_deposit": True,
+        "prepare": {
+            "chain_id": ARBITRUM_CHAIN_ID,
+            "usdc_token_id": "usd-coin-arbitrum",
+            "native_float_wei": 300_000_000_000_000,  # 0.0003 ETH
+            "gas_swap_usd": 2.5,
+        },
+    },
 }
 
+# Legacy profile → default strategy mapping, used only by the migration-era
+# POST / route when the request omits strategyName.
 PROFILE_STRATEGIES: dict[str, dict[str, Any]] = {
-    "stable_lender": {
-        "strategy_name": "stablecoin_yield_strategy",
-    },
-    "conservative_yield": {
-        "todo": "Needs Base + target-chain composition; multi_vault_split requires Arbitrum/HyperEVM funding.",
-    },
-    "balanced_defi": {
-        "todo": "Base strategies are wired, but the full profile still needs target-chain funding for multi_vault_split.",
-    },
-    "aggressive_growth": {
-        "todo": "Moonwell is wired; basis_trading/projectx need Arbitrum/HyperEVM/Hyperliquid prefunding.",
-    },
-    "max_speculation": {
-        "todo": "Moonwell is wired; basis_trading/boros need multi-chain prefunding and orchestration.",
-    },
+    "stable_lender": {"strategy_name": "stablecoin_yield_rotator"},
+    "conservative_yield": {},
+    "balanced_defi": {},
+    "aggressive_growth": {},
+    "max_speculation": {},
 }
+
+
+class StrategyResolutionError(ValueError):
+    pass
+
+
+def resolve_strategy(
+    profile_id: str | None, strategy_name: str | None
+) -> tuple[str, dict[str, Any]]:
+    """Resolve the (strategy_name, spec) a request addresses, or raise."""
+    if strategy_name:
+        spec = STRATEGY_SPECS.get(strategy_name)
+        if spec is None:
+            raise StrategyResolutionError(f"unknown strategyName: {strategy_name}")
+        return strategy_name, spec
+    profile_spec = PROFILE_STRATEGIES.get(profile_id or "")
+    if profile_spec is None:
+        raise StrategyResolutionError(f"unknown profileId: {profile_id}")
+    name = profile_spec.get("strategy_name")
+    if not name:
+        raise StrategyResolutionError(
+            f"profile {profile_id} requires an explicit strategyName"
+        )
+    return name, STRATEGY_SPECS[name]
 
 
 # ─── Funding (wallet holdings → USDC on Base, delivered to server wallet) ─
@@ -166,192 +238,6 @@ BASE_GAS_RESERVE_WEI = GAS_FLOAT_WEI + BASE_GAS_PADDING_WEI
 # RPC_URLS in lib/chains.ts — we only fund from these so every leg is
 # verifiable client-side rather than optimistically assumed mined.
 SUPPORTED_CHAINS = {1, 10, 56, 137, 5000, 8453, 42161, 43114}
-
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self) -> None:  # noqa: N802 — required by BaseHTTPRequestHandler
-        if not INTERNAL_SECRET:
-            self._respond(503, {"error": "internal sidecar secret is not configured"})
-            return
-        if self.headers.get("x-tilt-internal-secret") != INTERNAL_SECRET:
-            self._respond(403, {"error": "forbidden"})
-            return
-
-        length = int(self.headers.get("content-length", "0"))
-        raw = self.rfile.read(length) if length else b"{}"
-        try:
-            body = json.loads(raw or b"{}")
-        except json.JSONDecodeError:
-            self._respond(400, {"error": "invalid JSON body"})
-            return
-
-        profile_id = body.get("profileId")
-        strategy_name = body.get("strategyName")
-        amount_usd = body.get("amountUsd")
-        wallet_id = body.get("walletId")
-        wallet_address = body.get("walletAddress")
-        caip2 = body.get("caip2", DEFAULT_CAIP2)
-        user_jwt = self._user_jwt()
-
-        if not user_jwt:
-            self._respond(401, {"error": "missing user JWT"})
-            return
-
-        # Funding is its own operation: Wayfinder plans + builds the txs that
-        # move whatever the wallet holds into the server wallet as USDC on Base.
-        if body.get("operation") == "fund":
-            self._handle_fund(body)
-            return
-
-        if profile_id not in PROFILE_STRATEGIES:
-            self._respond(400, {"error": f"unknown profileId: {profile_id}"})
-            return
-        if not (wallet_id and wallet_address and isinstance(amount_usd, (int, float))):
-            self._respond(400, {"error": "walletId, walletAddress, amountUsd required"})
-            return
-
-        profile_spec = PROFILE_STRATEGIES[profile_id]
-        if strategy_name:
-            spec = STRATEGY_SPECS.get(strategy_name)
-            if spec is None:
-                self._respond(400, {"error": f"unknown strategyName: {strategy_name}"})
-                return
-        elif "strategy_name" in profile_spec:
-            strategy_name = profile_spec["strategy_name"]
-            spec = STRATEGY_SPECS[strategy_name]
-        elif "todo" in profile_spec:
-            # Profile recognised but Wayfinder composition not yet wired.
-            self._respond(200, {
-                "ok": True,
-                "source": "stub",
-                "profileId": profile_id,
-                "note": profile_spec["todo"],
-                "txHashes": [],
-            })
-            return
-        else:
-            self._respond(400, {"error": f"profile {profile_id} has no strategy mapping"})
-            return
-
-        # ─── Drive Wayfinder ─────────────────────────────────────────
-        try:
-            result = _run(
-                run_strategy(
-                    strategy_name=strategy_name,
-                    spec=spec,
-                    amount_usd=float(amount_usd),
-                    wallet_id=wallet_id,
-                    wallet_address=wallet_address,
-                    caip2=caip2,
-                )
-            )
-        except StrategyImportError as exc:
-            # Wayfinder not installed in the deployment yet.
-            self._respond(503, {
-                "ok": False,
-                "source": "missing-dep",
-                "error": str(exc),
-                "hint": "Add wayfinder-paths to api/wayfinder/requirements.txt and redeploy.",
-            })
-            return
-        except Exception as exc:
-            self._respond(502, {
-                "ok": False,
-                "source": "wayfinder-error",
-                "error": _wayfinder_error_message(exc),
-                "trace": traceback.format_exc(),
-            })
-            return
-
-        if not result.get("success", False):
-            self._respond(502, {"ok": False, "source": "wayfinder-error", **result})
-            return
-
-        self._respond(200, {"ok": True, "source": "live", **result})
-
-    def do_GET(self) -> None:  # noqa: N802
-        self._respond(200, {
-            "ok": True,
-            "service": "wayfinder-executor",
-            "profiles": list(PROFILE_STRATEGIES.keys()),
-            "wayfinderInstalled": _wayfinder_installed(),
-        })
-
-    def _handle_fund(self, body: dict) -> None:
-        """Plan funding, or report the wallet's investable balance.
-
-        mode="plan":    Wayfinder builds the tx(s) that move the wallet's
-                        holdings into the recipient (server) wallet as USDC
-                        on Base. Returns unsigned txs for the user to sign.
-        mode="balance": report the total investable USD Wayfinder sees, so
-                        the UI's 25/50/75/100% presets have a base.
-        """
-        mode = body.get("mode", "plan")
-        from_address = body.get("fromAddress")
-        recipient_address = body.get("recipientAddress")
-        target_units = body.get("targetUsdcUnits")
-        amount_usd = body.get("amountUsd")
-        target_caip2 = body.get("caip2", DEFAULT_CAIP2)
-
-        if not from_address:
-            self._respond(400, {"error": "fromAddress required"})
-            return
-        if mode == "plan" and not (recipient_address and target_units):
-            self._respond(400, {
-                "error": "recipientAddress and targetUsdcUnits required for plan",
-            })
-            return
-
-        runner = balance_fund if mode == "balance" else plan_fund
-        try:
-            result = _run(
-                runner(
-                    from_address=from_address,
-                    recipient_address=recipient_address,
-                    target_usdc_units=int(target_units) if target_units else 0,
-                    amount_usd=float(amount_usd) if amount_usd is not None else None,
-                    target_caip2=target_caip2,
-                )
-            )
-        except StrategyImportError as exc:
-            self._respond(503, {
-                "ok": False,
-                "source": "missing-dep",
-                "error": str(exc),
-                "hint": "Add wayfinder-paths to api/wayfinder/requirements.txt and redeploy.",
-            })
-            return
-        except Exception as exc:  # noqa: BLE001 — surface any Wayfinder failure
-            self._respond(502, {
-                "ok": False,
-                "source": "wayfinder-error",
-                "error": _wayfinder_error_message(exc),
-                "trace": traceback.format_exc(),
-            })
-            return
-
-        self._respond(200, {"ok": True, "source": "live", **result})
-
-    def _user_jwt(self) -> str:
-        # Primary: a custom header. Cloud Run intercepts `Authorization: Bearer`
-        # and validates it as a Google IAM token (401s anything else), so the
-        # Next layer forwards the Privy JWT here instead. Fall back to
-        # Authorization only for local compatibility.
-        jwt = self.headers.get("x-tilt-user-jwt", "").strip()
-        if jwt:
-            return jwt
-        auth = self.headers.get("authorization", "")
-        if auth.lower().startswith("bearer "):
-            return auth[7:].strip()
-        return ""
-
-    def _respond(self, status: int, payload: Any) -> None:
-        body = json.dumps(payload).encode()
-        self.send_response(status)
-        self.send_header("content-type", "application/json")
-        self.send_header("content-length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
 
 class StrategyImportError(RuntimeError):
     pass
@@ -453,6 +339,51 @@ def make_privy_sign_callback(
     return sign_callback
 
 
+def make_privy_sign_typed_data_callback(
+    wallet_id: str,
+) -> Callable[[str | dict], Awaitable[str]]:
+    """Return an `async (payload) -> '0x…'` matching Wayfinder's
+    sign_typed_data contract (EIP-712), via Privy's eth_signTypedData_v4.
+    Hyperliquid exchange actions and HyperEVM permit flows sign this way."""
+
+    import httpx
+
+    auth = (PRIVY_APP_ID, PRIVY_APP_SECRET)
+
+    def sanitize(obj: Any) -> Any:
+        if isinstance(obj, bytes):
+            return "0x" + obj.hex()
+        if isinstance(obj, dict):
+            return {k: sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [sanitize(v) for v in obj]
+        return obj
+
+    async def sign_typed_data(payload: str | dict) -> str:
+        message = json.loads(payload) if isinstance(payload, str) else payload
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                f"{PRIVY_API_BASE}/v1/wallets/{wallet_id}/rpc",
+                headers={"privy-app-id": PRIVY_APP_ID},
+                auth=auth,
+                json={
+                    "method": "eth_signTypedData_v4",
+                    "params": {"typed_data": sanitize(message)},
+                },
+            )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"privy typed-data sign failed: {resp.status_code} {resp.text}"
+            )
+        body = resp.json()
+        sig = body.get("data", {}).get("signature") or body.get("signature")
+        if not sig:
+            raise RuntimeError(f"privy returned no signature: {body!r}")
+        return sig if sig.startswith("0x") else f"0x{sig}"
+
+    return sign_typed_data
+
+
 def _prepare_tx_for_privy(tx: dict, default_chain_id: int) -> dict:
     """Coerce a Wayfinder (web3, camelCase) tx into Privy's eth_signTransaction
     shape. Privy wants snake_case fields and a required integer `chain_id`; it
@@ -537,30 +468,62 @@ async def run_strategy(
         raise ValueError(f"{class_name} requires {expected_caip2}, got {caip2}")
 
     # Dynamic import keeps the function importable even when Wayfinder
-    # isn't installed (the GET handler reports it).
+    # isn't installed (the health route reports it).
     module = __import__(module_path, fromlist=[class_name])
     StrategyClass = getattr(module, class_name)
 
     sign_callback = make_privy_sign_callback(wallet_id, wallet_address, caip2)
     wallet_entry = {"address": wallet_address, "label": "tilt-server"}
 
-    strategy = StrategyClass(
-        config={},
-        main_wallet=wallet_entry,
-        strategy_wallet=wallet_entry,
-        main_wallet_signing_callback=sign_callback,
-        strategy_wallet_signing_callback=sign_callback,
-    )
+    lifecycle: dict[str, Any] = {}
+
+    # Target-chain prep: self-bridge Base USDC → target-chain USDC + native
+    # gas before the strategy runs. The strategy then deposits what actually
+    # arrived (bridge output net of fees), not the nominal request.
+    deposit_amount = amount_usd
+    prep_spec = spec.get("prepare")
+    if prep_spec:
+        prep = await prepare_target_chain(
+            wallet_id=wallet_id,
+            wallet_address=wallet_address,
+            amount_usd=amount_usd,
+            **prep_spec,
+        )
+        lifecycle["prepare"] = {k: v for k, v in prep.items() if k != "success"}
+        if not prep["success"]:
+            return {
+                "success": False,
+                "strategyName": strategy_name,
+                "error": f"target-chain prep failed: {prep.get('error')}",
+                "status": lifecycle,
+                "txHashes": [],
+            }
+        deposit_amount = prep["deposit_amount_usd"]
+
+    kwargs: dict[str, Any] = {
+        "config": {},
+        "main_wallet": wallet_entry,
+        "strategy_wallet": wallet_entry,
+        "main_wallet_signing_callback": sign_callback,
+        "strategy_wallet_signing_callback": sign_callback,
+    }
+    # Hyperliquid/HyperEVM strategies sign EIP-712 actions; wire Privy
+    # typed-data signing when the constructor accepts it.
+    params = set(inspect.signature(StrategyClass.__init__).parameters)
+    if "strategy_sign_typed_data" in params or "kwargs" in params:
+        kwargs["strategy_sign_typed_data"] = make_privy_sign_typed_data_callback(
+            wallet_id
+        )
+
+    strategy = StrategyClass(**kwargs)
 
     # setup() loads token/pool info (e.g. usdc_token_info) and must run before
     # deposit() — otherwise deposit raises AttributeError on those fields.
     await strategy.setup()
 
-    lifecycle: dict[str, Any] = {
-        "deposit": _serialize_status(
-            await strategy.deposit(main_token_amount=amount_usd)
-        )
-    }
+    lifecycle["deposit"] = _serialize_status(
+        await strategy.deposit(main_token_amount=deposit_amount)
+    )
     deposit_ok, deposit_message = _status_ok_message(lifecycle["deposit"])
     if not deposit_ok:
         return {
@@ -589,6 +552,399 @@ async def run_strategy(
         "status": lifecycle,
         "txHashes": [],
     }
+
+
+# ─── Target-chain preparation (server wallet self-bridging) ──────────────
+#
+# Strategies that expect main-wallet funds on Arbitrum/HyperEVM declare a
+# `prepare` spec. The engine bridges the server wallet's Base USDC to the
+# target chain via BRAP — two legs, both signed by the Privy server wallet:
+#   1. Base USDC → target-chain native (gas float), skipped when the wallet
+#      already holds `native_float_wei` there.
+#   2. Base USDC → target-chain USDC for the rest of the step amount,
+#      skipped when a previous (failed/retried) run already delivered it.
+# Bridges land asynchronously, so each leg polls the destination balance.
+# The strategy then deposits what actually arrived, not the nominal amount.
+
+NATIVE_TOKEN_SENTINEL = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+PREP_SLIPPAGE = 0.003
+PREP_BRIDGE_TIMEOUT_SECONDS = 900
+PREP_POLL_SECONDS = 10
+
+
+async def _native_balance_wei(chain_id: int, address: str) -> int:
+    from wayfinder_paths.core.utils.web3 import web3_from_chain_id
+
+    async with web3_from_chain_id(chain_id) as w3:
+        return int(await w3.eth.get_balance(w3.to_checksum_address(address)))
+
+
+async def _wait_for_arrival(
+    read_balance: Callable[[], Awaitable[int]], target: int, what: str
+) -> int:
+    """Poll until `read_balance()` ≥ target (bridges deliver asynchronously)."""
+    deadline = asyncio.get_event_loop().time() + PREP_BRIDGE_TIMEOUT_SECONDS
+    while True:
+        have = int(await read_balance())
+        if have >= target:
+            return have
+        if asyncio.get_event_loop().time() > deadline:
+            raise RuntimeError(
+                f"timed out waiting for {what} to arrive "
+                f"(have {have}, want {target})"
+            )
+        await asyncio.sleep(PREP_POLL_SECONDS)
+
+
+async def _brap_bridge_leg(
+    *,
+    adapter: Any,
+    sender: str,
+    to_token_address: str,
+    to_chain_id: int,
+    base_usdc_units: int,
+    label: str,
+) -> dict[str, Any]:
+    """Quote + execute one Base-USDC→target swap; returns the executed quote."""
+    ok, quote = await adapter.best_quote(
+        from_token_address=USDC_BASE,
+        to_token_address=to_token_address,
+        from_chain_id=BASE_CHAIN_ID,
+        to_chain_id=to_chain_id,
+        from_address=sender,
+        amount=str(base_usdc_units),
+        slippage=PREP_SLIPPAGE,
+    )
+    if not ok or not isinstance(quote, dict):
+        raise RuntimeError(f"{label}: BRAP quote failed: {quote}")
+    # swap_from_quote only reads chain.id + address off the token dicts (the
+    # rest feeds its best-effort ledger record).
+    from_token = {
+        "chain": {"id": BASE_CHAIN_ID},
+        "address": USDC_BASE,
+        "symbol": "USDC",
+        "decimals": USDC_DECIMALS,
+    }
+    to_token = {"chain": {"id": to_chain_id}, "address": to_token_address}
+    ok, result = await adapter.swap_from_quote(
+        from_token=from_token,
+        to_token=to_token,
+        from_address=sender,
+        quote=quote,
+        strategy_name="tilt-target-chain-prep",
+    )
+    if not ok:
+        raise RuntimeError(f"{label}: swap failed: {result}")
+    return quote
+
+
+async def prepare_target_chain(
+    *,
+    wallet_id: str,
+    wallet_address: str,
+    amount_usd: float,
+    chain_id: int,
+    usdc_token_id: str,
+    native_float_wei: int,
+    gas_swap_usd: float,
+) -> dict[str, Any]:
+    """Ensure the server wallet holds target-chain USDC + native gas for a
+    strategy step, self-bridging from its Base USDC. Returns a report with
+    `success` and the post-prep `deposit_amount_usd`."""
+    from wayfinder_paths.adapters.brap_adapter.adapter import BRAPAdapter
+    from wayfinder_paths.core.clients.TokenClient import TOKEN_CLIENT
+    from wayfinder_paths.core.utils.tokens import get_token_balance
+    from wayfinder_paths.mcp.scripting import get_adapter
+
+    _apply_rotator_wallet_patches()
+    label = _rotator_label(wallet_id, wallet_address)
+    report: dict[str, Any] = {"chainId": chain_id, "legs": []}
+
+    try:
+        target_usdc = await TOKEN_CLIENT.get_token_details(usdc_token_id)
+        if not target_usdc or not target_usdc.get("address"):
+            raise RuntimeError(f"cannot resolve token {usdc_token_id}")
+        usdc_address = str(target_usdc["address"])
+        usdc_decimals = int(target_usdc.get("decimals") or 6)
+
+        async def usdc_balance() -> int:
+            return int(
+                await get_token_balance(
+                    token_address=usdc_address,
+                    chain_id=chain_id,
+                    wallet_address=wallet_address,
+                )
+            )
+
+        have_usdc = await usdc_balance()
+        have_native = await _native_balance_wei(chain_id, wallet_address)
+        adapter = await get_adapter(BRAPAdapter, label)
+
+        # Leg 1 — native gas float.
+        gas_spent_usd = 0.0
+        if have_native < native_float_wei:
+            await _brap_bridge_leg(
+                adapter=adapter,
+                sender=wallet_address,
+                to_token_address=NATIVE_TOKEN_SENTINEL,
+                to_chain_id=chain_id,
+                base_usdc_units=int(gas_swap_usd * 10**USDC_DECIMALS),
+                label="gas leg",
+            )
+            await _wait_for_arrival(
+                lambda: _native_balance_wei(chain_id, wallet_address),
+                native_float_wei,
+                f"native gas on chain {chain_id}",
+            )
+            gas_spent_usd = gas_swap_usd
+            report["legs"].append({"leg": "gas", "spentUsd": gas_swap_usd})
+        else:
+            report["legs"].append({"leg": "gas", "skipped": "already funded"})
+
+        # Leg 2 — the step's USDC. Skip when a prior (retried) run already
+        # delivered roughly the expected amount to the target chain.
+        bridge_usd = max(0.0, amount_usd - gas_spent_usd)
+        bridge_units = int(bridge_usd * 10**USDC_DECIMALS)
+        expected_units = int(bridge_usd * 0.97 * 10**usdc_decimals)
+        if have_usdc >= expected_units:
+            deposit_units = min(have_usdc, int(bridge_usd * 10**usdc_decimals))
+            report["legs"].append({"leg": "usdc", "skipped": "already funded"})
+        else:
+            quote = await _brap_bridge_leg(
+                adapter=adapter,
+                sender=wallet_address,
+                to_token_address=usdc_address,
+                to_chain_id=chain_id,
+                base_usdc_units=bridge_units,
+                label="usdc leg",
+            )
+            quoted_out = int(
+                quote.get("output_amount") or quote.get("outputAmount") or 0
+            )
+            floor = have_usdc + (
+                int(quoted_out * 0.95) if quoted_out else expected_units
+            )
+            arrived = await _wait_for_arrival(
+                usdc_balance, floor, f"USDC on chain {chain_id}"
+            )
+            deposit_units = arrived - have_usdc
+            report["legs"].append({
+                "leg": "usdc",
+                "bridgedBaseUnits": bridge_units,
+                "receivedUnits": deposit_units,
+            })
+
+        # Stablecoin ≈ $1; round down to the cent so the deposit never
+        # exceeds what's actually there.
+        deposit_amount_usd = int(deposit_units / 10**usdc_decimals * 100) / 100
+        return {
+            **report,
+            "success": True,
+            "deposit_amount_usd": deposit_amount_usd,
+        }
+    except Exception as exc:  # noqa: BLE001 — reported in the lifecycle
+        return {**report, "success": False, "error": str(exc)}
+
+
+# ─── Stablecoin Yield Rotator (vendored Wayfinder path) ──────────────────
+#
+# The rotator is a Wayfinder *path* (paths/stablecoin-yield-rotator in the SDK
+# repo), not a strategy class: its action functions resolve their signer
+# internally through wayfinder_paths wallet-label lookup instead of accepting
+# signing-callback constructor args. We bridge Privy in at that seam — the
+# wallet "label" in the per-request config encodes the Privy wallet id and
+# address (`tilt:<wallet-id>:<address>`), and the SDK's label resolver is
+# patched once, process-wide, to recognise that encoding and hand back our
+# Privy-backed signer. The path itself runs unmodified from the vendored copy
+# in rotator/scripts/.
+
+ROTATOR_LABEL_PREFIX = "tilt:"
+ROTATOR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rotator")
+
+# Base-only on purpose: tilt funds USDC + the gas float on Base only, so
+# venues on other chains would fail the rotator's per-chain native-gas check
+# (and cross-chain rotation legs would have no gas to execute).
+ROTATOR_CONFIG_BASE: dict[str, Any] = {
+    "chains": [BASE_CHAIN_ID],
+    "assets": ["USDC"],
+    "venues": ["aave_v3", "morpho_blue_market", "morpho_vault", "euler_v2", "moonwell"],
+    # Mirrors the path's shipped inputs/config.yaml defaults.
+    "constraints": {
+        "min_apy_delta_bps": 50,
+        "gas_amortization_days": 30,
+        "max_gas_usd_per_rotation": 25,
+        "max_position_pct_per_venue": 50,
+        "min_scan_tvl_usd": 100_000,
+        "max_scan_apy": 0.5,
+        "blocklist_markets": [],
+    },
+    "slippage_bps": 30,
+}
+
+
+def _rotator_label(wallet_id: str, wallet_address: str) -> str:
+    return f"{ROTATOR_LABEL_PREFIX}{wallet_id}:{wallet_address}"
+
+
+def _parse_rotator_label(label: str) -> tuple[str, str] | None:
+    """`tilt:<privy-wallet-id>:<address>` → (wallet_id, address), else None."""
+    if not label.startswith(ROTATOR_LABEL_PREFIX):
+        return None
+    wallet_id, sep, address = label[len(ROTATOR_LABEL_PREFIX):].rpartition(":")
+    if not sep or not wallet_id or not address:
+        return None
+    return wallet_id, address
+
+
+_ROTATOR_PATCHED = False
+
+
+def _apply_rotator_wallet_patches() -> None:
+    """Teach the SDK's wallet-label resolution about tilt's encoded labels.
+
+    All rotator signing funnels through wayfinder_paths.core.utils.wallets:
+    the three get_wallet_*_callback functions call find_wallet_by_label and
+    _build_*_callback as late-bound module globals, so patching those covers
+    the from-imports in the path's venues.py and the SDK's mcp.scripting.
+    """
+    global _ROTATOR_PATCHED
+    if _ROTATOR_PATCHED:
+        return
+    import wayfinder_paths.core.utils.wallets as wf_wallets
+
+    orig_find = wf_wallets.find_wallet_by_label
+
+    async def find_wallet_by_label(label: str) -> dict[str, Any] | None:
+        parsed = _parse_rotator_label(str(label or ""))
+        if parsed:
+            wallet_id, address = parsed
+            return {
+                "address": address,
+                "label": label,
+                "type": "privy",
+                "wallet_id": wallet_id,
+            }
+        return await orig_find(label)
+
+    orig_build_sign = wf_wallets._build_signing_callback
+
+    def _build_signing_callback(wallet: dict[str, Any], label: str):
+        if wallet.get("type") == "privy":
+            address = wallet["address"]
+            return (
+                make_privy_sign_callback(wallet["wallet_id"], address, DEFAULT_CAIP2),
+                address,
+            )
+        return orig_build_sign(wallet, label)
+
+    orig_build_typed = wf_wallets._build_typed_data_callback
+
+    def _build_typed_data_callback(wallet: dict[str, Any], label: str):
+        if wallet.get("type") == "privy":
+            return (
+                make_privy_sign_typed_data_callback(wallet["wallet_id"]),
+                wallet["address"],
+            )
+        return orig_build_typed(wallet, label)
+
+    # get_adapter eagerly wires a hash callback when an adapter's __init__
+    # accepts one; return a stub that only fails if actually invoked, so
+    # adapter construction succeeds for the flows we use.
+    orig_build_hash = wf_wallets._build_sign_hash_callback
+
+    def _build_sign_hash_callback(wallet: dict[str, Any], label: str):
+        if wallet.get("type") != "privy":
+            return orig_build_hash(wallet, label)
+
+        async def unsupported(*_args: Any, **_kwargs: Any) -> str:
+            raise NotImplementedError("Privy raw-hash signing is not wired")
+
+        return unsupported, wallet["address"]
+
+    wf_wallets.find_wallet_by_label = find_wallet_by_label
+    wf_wallets._build_signing_callback = _build_signing_callback
+    wf_wallets._build_typed_data_callback = _build_typed_data_callback
+    wf_wallets._build_sign_hash_callback = _build_sign_hash_callback
+    _ROTATOR_PATCHED = True
+
+
+_ROTATOR_MAIN: Any = None
+
+
+def _rotator_main() -> Any:
+    """Load the vendored rotator entrypoint (wallet patches must come first)."""
+    global _ROTATOR_MAIN
+    if _ROTATOR_MAIN is not None:
+        return _ROTATOR_MAIN
+    if not _wayfinder_installed():
+        raise StrategyImportError(
+            "wayfinder_paths is not installed in this Python runtime"
+        )
+    _apply_rotator_wallet_patches()
+
+    import importlib.util
+
+    main_path = os.path.join(ROTATOR_DIR, "scripts", "main.py")
+    spec = importlib.util.spec_from_file_location("tilt_rotator_main", main_path)
+    if spec is None or spec.loader is None:
+        raise StrategyImportError(f"cannot load rotator entrypoint at {main_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    # The stock resolver only accepts labels present in the SDK wallet config;
+    # short-circuit tilt's encoded labels. Late-bound module global, so the
+    # action functions pick the patched version up.
+    orig_resolve = module._resolve_wallet_label
+
+    async def _resolve_wallet_label(config: dict[str, Any]) -> str:
+        label = str(config.get("wallet") or "")
+        if _parse_rotator_label(label):
+            return label
+        return await orig_resolve(config)
+
+    module._resolve_wallet_label = _resolve_wallet_label
+    _ROTATOR_MAIN = module
+    return module
+
+
+async def run_rotator(
+    *,
+    strategy_name: str,
+    spec: dict[str, Any],
+    amount_usd: float,
+    wallet_id: str,
+    wallet_address: str,
+    caip2: str,
+) -> dict[str, Any]:
+    """Drive the rotator path's deposit action against the user's Privy
+    server wallet: scan venues, re-check the target market, gas-check, lend."""
+    min_amount = float(spec.get("min_amount_usd", 0))
+    if amount_usd < min_amount:
+        raise ValueError(
+            f"amount {amount_usd} below {strategy_name} minimum {min_amount}"
+        )
+    expected_caip2 = spec.get("caip2")
+    if expected_caip2 and caip2 != expected_caip2:
+        raise ValueError(f"{strategy_name} requires {expected_caip2}, got {caip2}")
+
+    _configure_wayfinder_sdk()
+    module = _rotator_main()
+    config = {
+        **ROTATOR_CONFIG_BASE,
+        "wallet": _rotator_label(wallet_id, wallet_address),
+    }
+
+    result = await module.action_deposit(config, asset="USDC", human_amount=amount_usd)
+    ok = result.get("status") == "ok"
+    out: dict[str, Any] = {
+        "success": ok,
+        "strategyName": strategy_name,
+        "status": {"deposit": _jsonable(result)},
+        "txHashes": [],
+    }
+    if not ok:
+        out["error"] = f"deposit {result.get('status')}: {result.get('reason')}"
+    return out
 
 
 # ─── Funding conversion ──────────────────────────────────────────────────

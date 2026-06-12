@@ -4,6 +4,7 @@ import { getOrProvisionServerWallet } from "@/lib/wallet-registry";
 import { buildPlan, GAS_FUNDING_WEI, type ClientTx } from "@/lib/strategy-plan";
 import { FUNDING_CAIP2, FUNDING_CHAIN_ID, RPC_URLS, TOKENS, usdcUnits } from "@/lib/chains";
 import { callWayfinder } from "@/lib/wayfinder-sidecar";
+import { createExecution } from "@/lib/execution-ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -110,7 +111,13 @@ export async function POST(req: Request) {
       embeddedWalletAddress: body.embeddedWalletAddress,
       serverWalletAddress: wallet.address,
     });
-    return NextResponse.json({ plan, serverWallet: wallet });
+    const executionId = await createExecution({
+      userId: user.userId,
+      risk: body.risk,
+      plan,
+      serverWalletId: wallet.walletId,
+    });
+    return NextResponse.json({ plan, serverWallet: wallet, executionId });
   }
 
   // Ask Wayfinder to plan + build the funding transactions for the shortfall:
@@ -119,9 +126,7 @@ export async function POST(req: Request) {
   const origin = new URL(req.url).origin;
   let fundingTxs: ClientTx[] | undefined;
   if (shortfallUnits > 0n) {
-    const planned = await callWayfinder(origin, user.jwt, {
-      operation: "fund",
-      mode: "plan",
+    const planned = await callWayfinder(origin, user.jwt, "/fund/plan", {
       amountUsd: body.amountUsd,
       targetUsdcUnits: shortfallUnits.toString(),
       fromAddress: body.embeddedWalletAddress,
@@ -151,5 +156,15 @@ export async function POST(req: Request) {
     includeGasFloat,
   });
 
-  return NextResponse.json({ plan, serverWallet: wallet });
+  // Persist the execution — including the Wayfinder-built funding txs and
+  // quoted amounts — so every subsequent call validates against this record
+  // instead of trusting re-sent client inputs.
+  const executionId = await createExecution({
+    userId: user.userId,
+    risk: body.risk,
+    plan,
+    serverWalletId: wallet.walletId,
+  });
+
+  return NextResponse.json({ plan, serverWallet: wallet, executionId });
 }

@@ -12,7 +12,8 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY execute.py server.py ./
+COPY execute.py app.py ledger.py server.py ./
+COPY rotator/ ./rotator/
 
 ENV PORT=8080
 EXPOSE 8080

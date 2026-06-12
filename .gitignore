@@ -10,6 +10,9 @@ out/
 __pycache__/
 *.pyc
 
+# Rotator path scan cache (written at runtime next to the vendored scripts)
+api/wayfinder/rotator/inputs/
+
 # Local Claude Code agent config
 .claude/
 

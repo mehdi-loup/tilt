@@ -3,6 +3,12 @@
 // Each profile invokes one or more Wayfinder strategies.
 // Wayfinder is the source of truth for the actual deposit logic, slippage,
 // pool selection, etc. — we just declare which strategy and how much.
+//
+// Strategies that need funds on another chain (Arbitrum, HyperEVM) are still
+// funded on Base: the sidecar self-bridges the server wallet's Base USDC to
+// the target chain (BRAP, Privy-signed) before the strategy runs. The
+// minimums mirror api/wayfinder/execute.py's STRATEGY_SPECS — strategy
+// minimum plus bridging/gas headroom.
 
 import type { RiskProfileId } from "./tilt";
 
@@ -29,8 +35,8 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
   stable_lender: {
     steps: [
       {
-        strategyName: "stablecoin_yield_strategy",
-        label: "Stablecoin Yield · Base USDC",
+        strategyName: "stablecoin_yield_rotator",
+        label: "Stablecoin Yield Rotator · Base USDC",
         chain: "base",
         minAmountUsd: 2,
         status: "live",
@@ -40,27 +46,26 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
   conservative_yield: {
     steps: [
       {
-        strategyName: "stablecoin_yield_strategy",
-        label: "Stablecoin Yield · Base USDC",
+        strategyName: "stablecoin_yield_rotator",
+        label: "Stablecoin Yield Rotator · Base USDC",
         chain: "base",
         minAmountUsd: 2,
         status: "live",
       },
       {
         strategyName: "multi_vault_split_strategy",
-        label: "Multi-Vault Split · HyperEVM",
-        chain: "hyperEVM",
-        minAmountUsd: 10,
-        status: "stub",
-        pendingNote: "Needs target-chain USDC/gas funding before deposit.",
+        label: "Multi-Vault Split · HLP/Boros/Avantis",
+        chain: "multi",
+        minAmountUsd: 45,
+        status: "live",
       },
     ],
   },
   balanced_defi: {
     steps: [
       {
-        strategyName: "stablecoin_yield_strategy",
-        label: "Stablecoin Yield · Base USDC",
+        strategyName: "stablecoin_yield_rotator",
+        label: "Stablecoin Yield Rotator · Base USDC",
         chain: "base",
         minAmountUsd: 2,
         status: "live",
@@ -74,11 +79,10 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
       },
       {
         strategyName: "multi_vault_split_strategy",
-        label: "Multi-Vault Split · HyperEVM",
-        chain: "hyperEVM",
-        minAmountUsd: 10,
-        status: "stub",
-        pendingNote: "Needs target-chain USDC/gas funding before deposit.",
+        label: "Multi-Vault Split · HLP/Boros/Avantis",
+        chain: "multi",
+        minAmountUsd: 45,
+        status: "live",
       },
     ],
   },
@@ -95,17 +99,15 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         strategyName: "basis_trading_strategy",
         label: "Basis Trading · Hyperliquid",
         chain: "hyperliquid",
-        minAmountUsd: 25,
-        status: "stub",
-        pendingNote: "Needs Arbitrum/Hyperliquid funding before deposit.",
+        minAmountUsd: 30,
+        status: "live",
       },
       {
         strategyName: "projectx_thbill_usdc_strategy",
         label: "ProjectX THBILL/USDC · HyperEVM",
         chain: "hyperEVM",
-        minAmountUsd: 25,
-        status: "stub",
-        pendingNote: "Needs HyperEVM USDC/gas funding before deposit.",
+        minAmountUsd: 15,
+        status: "live",
       },
     ],
   },
@@ -122,17 +124,15 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         strategyName: "basis_trading_strategy",
         label: "Basis Trading · Hyperliquid",
         chain: "hyperliquid",
-        minAmountUsd: 25,
-        status: "stub",
-        pendingNote: "Needs Arbitrum/Hyperliquid funding before deposit.",
+        minAmountUsd: 30,
+        status: "live",
       },
       {
         strategyName: "boros_hype_strategy",
         label: "Boros HYPE · multi-chain",
         chain: "multi",
-        minAmountUsd: 50,
-        status: "stub",
-        pendingNote: "Needs multi-chain USDC/gas funding before deposit.",
+        minAmountUsd: 160,
+        status: "live",
       },
     ],
   },
@@ -144,7 +144,9 @@ export function isProfileExecutable(profileId: RiskProfileId): boolean {
 }
 
 export function minimumAmountUsd(profileId: RiskProfileId): number {
+  // The plan splits the amount equally across live steps, so every step's
+  // share must clear that step's own minimum: total ≥ n × max(min_i).
   const liveSteps = PROFILE_COMPOSITION[profileId].steps.filter((step) => step.status === "live");
   if (liveSteps.length === 0) return 1;
-  return Math.max(...liveSteps.map((step) => step.minAmountUsd));
+  return liveSteps.length * Math.max(...liveSteps.map((step) => step.minAmountUsd));
 }

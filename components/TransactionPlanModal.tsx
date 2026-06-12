@@ -51,6 +51,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
   const [balanceErr, setBalanceErr] = useState<string | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
+  const [executionId, setExecutionId] = useState<string | null>(null);
   const [planErr, setPlanErr] = useState<string | null>(null);
   const [quoteWarning, setQuoteWarning] = useState<string | null>(null);
   const [walletErr, setWalletErr] = useState<string | null>(null);
@@ -130,8 +131,13 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(body.error ?? `HTTP ${res.status}`);
       }
-      const body = (await res.json()) as { plan: Plan; quoteError?: string };
+      const body = (await res.json()) as {
+        plan: Plan;
+        executionId?: string;
+        quoteError?: string;
+      };
       setPlan(body.plan);
+      setExecutionId(body.executionId ?? null);
       setQuoteWarning(body.quoteError ?? null);
       const init: Record<string, StepState> = {};
       for (const s of body.plan.steps) init[s.id] = { status: "idle" };
@@ -158,6 +164,31 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
       setCreatingWallet(false);
     }
   }, [authenticated, createWallet, login]);
+
+  // Report client-signed (funding) step progress to the execution ledger so
+  // the server record — not this tab — is the source of truth.
+  const reportFundStep = useCallback(
+    async (
+      stepId: string,
+      status: "running" | "succeeded" | "failed",
+      txHash?: string,
+      error?: string,
+    ) => {
+      if (!executionId) return;
+      try {
+        const jwt = await getAccessToken();
+        await fetch(`/api/plan/execution/${executionId}/step`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+          body: JSON.stringify({ stepId, status, txHash, error }),
+        });
+      } catch {
+        // Ledger reporting is best-effort from the client; the funding tx
+        // itself is already on-chain.
+      }
+    },
+    [executionId, getAccessToken],
+  );
 
   const runFundStep = useCallback(
     async (step: PlanStep): Promise<StepState> => {
@@ -189,38 +220,77 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
           params: [txReq],
         })) as string;
       }
-      await waitForReceipt(hash, step.tx.chainId);
+      await reportFundStep(step.id, "running", hash);
+      try {
+        await waitForReceipt(hash, step.tx.chainId);
+      } catch (err) {
+        await reportFundStep(
+          step.id,
+          "failed",
+          hash,
+          err instanceof Error ? err.message : "receipt failed",
+        );
+        throw err;
+      }
+      await reportFundStep(step.id, "succeeded", hash);
       return { status: "success", txHashes: [hash] };
     },
-    [fundingWallet, sendTransaction],
+    [fundingWallet, reportFundStep, sendTransaction],
+  );
+
+  const pollStrategyStep = useCallback(
+    async (stepId: string): Promise<StepState> => {
+      // Strategy jobs run server-side and can take many minutes (bridging +
+      // multi-tx deposits); poll the ledger, not the job connection.
+      const jwt = await getAccessToken();
+      for (let attempt = 0; attempt < 900; attempt++) {
+        await sleep(3000);
+        const res = await fetch(`/api/plan/execution/${executionId}`, {
+          headers: { authorization: `Bearer ${jwt}` },
+        });
+        const body = (await res.json().catch(() => ({}))) as {
+          steps?: { stepId: string; status: string; txHashes?: string[]; note?: string; error?: string }[];
+        };
+        const step = body.steps?.find((s) => s.stepId === stepId);
+        if (!step) continue;
+        if (step.status === "succeeded") {
+          return { status: "success", txHashes: step.txHashes ?? [] };
+        }
+        if (step.status === "stub") return { status: "stub", note: step.note };
+        if (step.status === "failed") {
+          return { status: "error", error: step.error ?? "strategy step failed" };
+        }
+      }
+      return { status: "error", error: "timed out waiting for the strategy job" };
+    },
+    [executionId, getAccessToken],
   );
 
   const runServerStep = useCallback(
     async (step: PlanStep): Promise<StepState> => {
-      if (!fundingWallet) throw new Error("no funding wallet");
+      if (!executionId) throw new Error("execution was not persisted; rebuild the plan");
       const jwt = await getAccessToken();
       const res = await fetch("/api/plan/execute-step", {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
-        body: JSON.stringify({
-          stepId: step.id,
-          risk,
-          amountUsd: amount,
-          embeddedWalletAddress: fundingWallet.address,
-        }),
+        body: JSON.stringify({ executionId, stepId: step.id }),
       });
       const body = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
-        source?: "live" | "stub" | "missing-dep" | "wayfinder-error";
+        source?: "live" | "stub" | "job" | "ledger" | "missing-dep" | "wayfinder-error";
+        done?: boolean;
+        jobId?: string;
         txHashes?: string[];
         note?: string;
         error?: string;
       };
       if (!res.ok || !body.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      if (body.source !== "live") return { status: "stub", note: body.note };
+      // Async job: the sidecar writes progress to the ledger; poll it.
+      if (!body.done && body.jobId) return pollStrategyStep(step.id);
+      if (body.source === "stub") return { status: "stub", note: body.note };
       return { status: "success", txHashes: body.txHashes ?? [] };
     },
-    [amount, fundingWallet, getAccessToken, risk],
+    [executionId, getAccessToken, pollStrategyStep],
   );
 
   const runPlan = useCallback(async () => {

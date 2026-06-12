@@ -8,38 +8,42 @@ import "server-only";
 
 export interface WayfinderResult {
   ok?: boolean;
-  source?: "live" | "stub" | "missing-dep" | "wayfinder-error" | "error";
+  source?: "live" | "stub" | "job" | "missing-dep" | "wayfinder-error" | "error";
   success?: boolean;
   strategyName?: string;
   txHashes?: string[];
   note?: string;
   error?: string;
   status?: unknown;
-  // fund-plan: Wayfinder-built funding transactions for the connected wallet
+  // strategy/run (async): ledger-backed job id; the client polls the execution
+  jobId?: string;
+  // fund/plan: Wayfinder-built funding transactions for the connected wallet
   txs?: { to: string; data: string; value: string; chainId: number; label?: string }[];
-  // fund-balance: total investable USD value Wayfinder sees in the wallet
+  // fund/balance: total investable USD value Wayfinder sees in the wallet
   investableUsd?: number;
 }
 
-/** Shared Next.js → sidecar secret. Falls back to PRIVY_APP_SECRET. */
+/** Shared Next.js → sidecar secret. One secret, one purpose — no fallback. */
 export function wayfinderInternalSecret(): string | undefined {
-  return process.env.WAYFINDER_INTERNAL_SECRET ?? process.env.PRIVY_APP_SECRET;
+  return process.env.WAYFINDER_INTERNAL_SECRET;
 }
 
-function wayfinderSidecarUrl(origin: string): string {
+function wayfinderSidecarUrl(origin: string, path: string): string {
   const configured = process.env.WAYFINDER_SIDECAR_URL?.trim();
-  if (configured) return configured;
+  if (configured) return `${configured.replace(/\/+$/, "")}${path}`;
+  // Dev fallback only; 404s here surface a clear configuration error.
   return `${origin}/api/wayfinder/execute`;
 }
 
 /**
- * POST to the Python sidecar. Production deployments must provide
- * WAYFINDER_SIDECAR_URL for the Cloud Run service; the same-origin fallback is
- * only for local/dev setups that explicitly serve api/wayfinder/execute.py.
+ * POST to the Python sidecar (FastAPI: /fund/plan, /fund/balance,
+ * /strategy/run). Production deployments must provide WAYFINDER_SIDECAR_URL
+ * for the Cloud Run service.
  */
 export async function callWayfinder(
   origin: string,
   jwt: string,
+  path: "/fund/plan" | "/fund/balance" | "/strategy/run",
   body: Record<string, unknown>,
 ): Promise<{ ok: boolean; status: number; payload: WayfinderResult }> {
   const secret = wayfinderInternalSecret();
@@ -51,7 +55,7 @@ export async function callWayfinder(
     };
   }
   let res: Response;
-  const url = wayfinderSidecarUrl(origin);
+  const url = wayfinderSidecarUrl(origin, path);
   if (!process.env.WAYFINDER_SIDECAR_URL?.trim() && process.env.NODE_ENV === "production") {
     return {
       ok: false,
