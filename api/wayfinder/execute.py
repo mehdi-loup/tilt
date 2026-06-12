@@ -458,11 +458,6 @@ async def run_strategy(
 
     module_path: str = spec["module"]
     class_name: str = spec["class_name"]
-    min_amount = float(spec.get("min_amount_usd", 0))
-    if amount_usd < min_amount:
-        raise ValueError(
-            f"amount {amount_usd} below {class_name} minimum {min_amount}"
-        )
     expected_caip2 = spec.get("caip2")
     if expected_caip2 and caip2 != expected_caip2:
         raise ValueError(f"{class_name} requires {expected_caip2}, got {caip2}")
@@ -918,11 +913,6 @@ async def run_rotator(
 ) -> dict[str, Any]:
     """Drive the rotator path's deposit action against the user's Privy
     server wallet: scan venues, re-check the target market, gas-check, lend."""
-    min_amount = float(spec.get("min_amount_usd", 0))
-    if amount_usd < min_amount:
-        raise ValueError(
-            f"amount {amount_usd} below {strategy_name} minimum {min_amount}"
-        )
     expected_caip2 = spec.get("caip2")
     if expected_caip2 and caip2 != expected_caip2:
         raise ValueError(f"{strategy_name} requires {expected_caip2}, got {caip2}")

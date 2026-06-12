@@ -142,11 +142,3 @@ export function isProfileExecutable(profileId: RiskProfileId): boolean {
   const steps = PROFILE_COMPOSITION[profileId].steps;
   return steps.length > 0 && steps.every((step) => step.status === "live");
 }
-
-export function minimumAmountUsd(profileId: RiskProfileId): number {
-  // The plan splits the amount equally across live steps, so every step's
-  // share must clear that step's own minimum: total ≥ n × max(min_i).
-  const liveSteps = PROFILE_COMPOSITION[profileId].steps.filter((step) => step.status === "live");
-  if (liveSteps.length === 0) return 1;
-  return liveSteps.length * Math.max(...liveSteps.map((step) => step.minAmountUsd));
-}

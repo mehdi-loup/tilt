@@ -18,7 +18,7 @@ const C = {
   mono: '"JetBrains Mono", ui-monospace, monospace',
 } as const;
 
-const MIN_EXECUTE_USD = 2;
+const MIN_EXECUTE_USD = 0;
 
 type StepRuntimeStatus = "idle" | "running" | "success" | "stub" | "error";
 
@@ -339,7 +339,6 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
   const canExecute =
     !!plan &&
     plan.executable &&
-    amount >= plan.minimumAmountUsd &&
     fundReady &&
     !overBalance;
 

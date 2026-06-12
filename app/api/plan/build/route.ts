@@ -70,10 +70,6 @@ export async function POST(req: Request) {
       { status: 400 },
     );
   }
-  if (body.amountUsd < 1) {
-    return NextResponse.json({ error: "amountUsd must be ≥ 1" }, { status: 400 });
-  }
-
   const wallet = await getOrProvisionServerWallet(user.userId);
 
   // Preliminary plan (no funding txs) gives us executability + minimum.
@@ -83,13 +79,6 @@ export async function POST(req: Request) {
     embeddedWalletAddress: body.embeddedWalletAddress,
     serverWalletAddress: wallet.address,
   });
-  if (preview.executable && body.amountUsd < preview.minimumAmountUsd) {
-    return NextResponse.json(
-      { error: `amountUsd must be >= ${preview.minimumAmountUsd}` },
-      { status: 400 },
-    );
-  }
-
   // Preview-only profiles never fund — return as-is.
   if (!preview.executable) {
     return NextResponse.json({ plan: preview, serverWallet: wallet });

@@ -23,7 +23,6 @@ import { FUNDING_CHAIN_ID } from "./chains";
 import {
   PROFILE_COMPOSITION,
   isProfileExecutable,
-  minimumAmountUsd,
   type StrategyInvocation,
 } from "./profile-strategies";
 
@@ -75,7 +74,6 @@ export interface Plan {
   profileId: RiskProfileId;
   profileName: string;
   amountUsd: number;
-  minimumAmountUsd: number;
   executable: boolean;
   serverWalletAddress: string;
   embeddedWalletAddress: string;
@@ -111,7 +109,6 @@ export function buildPlan({
   const composition = PROFILE_COMPOSITION[profile.id];
   const totalUnits = BigInt(Math.round(amountUsd * 1_000_000)); // USDC base units
   const executable = isProfileExecutable(profile.id);
-  const minAmountUsd = minimumAmountUsd(profile.id);
 
   const steps: PlanStep[] = [];
 
@@ -182,7 +179,6 @@ export function buildPlan({
     profileId: profile.id,
     profileName: profile.name,
     amountUsd,
-    minimumAmountUsd: minAmountUsd,
     executable,
     serverWalletAddress,
     embeddedWalletAddress,
