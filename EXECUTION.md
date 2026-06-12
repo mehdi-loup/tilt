@@ -31,12 +31,31 @@ Next.js on Vercel ── BFF: Privy auth, plan building, persistence, status rea
    │           │             server-wallet registry (db/schema.sql)
    │           │
 Cloud Run (FastAPI) ── stateless "Wayfinder engine" (api/wayfinder/):
-                       POST /fund/plan      → Wayfinder builds unsigned funding txs
-                       POST /fund/balance   → investable USD for presets
-                       POST /strategy/run   → async job; prep-bridges to the
-                                              target chain, runs deposit()/update(),
-                                              writes status rows to Postgres
+                        POST /fund/plan      → Wayfinder builds unsigned funding txs
+                        POST /fund/balance   → investable USD for presets
+                        POST /strategy/run   → async job; prep-bridges to the
+                                               target chain, runs deposit()/update(),
+                                               writes status rows to Postgres
 ```
+
+### Sidecar Configuration
+
+The Next.js app reaches the sidecar via `WAYFINDER_SIDECAR_URL`. This is required in Vercel Production and Preview env vars.
+
+**Environment variables to set in Vercel:**
+- `WAYFINDER_SIDECAR_URL` — the Cloud Run service URL (e.g., `https://tilt-wayfinder-xyz.run.app`)
+- `WAYFINDER_INTERNAL_SECRET` — matches the sidecar's `WAYFINDER_INTERNAL_SECRET` (validates `x-tilt-internal-secret` header)
+- `WAYFINDER_API_BASE_URL` — override for the Wayfinder SDK API base (defaults to `https://strategies.wayfinder.ai/api/v1`)
+
+**Cloud Run deploy command (project `project-e1f51a28-…`, region `us-east1`):**
+```bash
+gcloud run deploy tilt-wayfinder \
+  --source api/wayfinder \
+  --no-cpu-throttling \
+  --min-instances 1
+```
+
+Set the same `WAYFINDER_INTERNAL_SECRET`, `WAYFINDER_API_KEY`, and `DATABASE_URL` as env vars on the Cloud Run service.
 
 ## Wallets
 
