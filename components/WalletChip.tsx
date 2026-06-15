@@ -32,8 +32,13 @@ export function WalletChip() {
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  const embedded = wallets.find((w) => w.walletClientType === "privy");
-  const address = embedded?.address ?? wallets[0]?.address;
+  // Show the user's connected (external) wallet — the one they fund from —
+  // and only fall back to the Privy embedded wallet. Mirrors the funding-wallet
+  // selection in TransactionPlanModal.
+  const fundingWallet =
+    wallets.find((w) => w.walletClientType !== "privy") ??
+    wallets.find((w) => w.walletClientType === "privy");
+  const address = fundingWallet?.address;
 
   if (!ready) {
     return (

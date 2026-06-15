@@ -780,7 +780,11 @@ function PlanSummary({ plan }: { plan: Plan }) {
           letterSpacing: 1,
         }}
       >
-        EXEC WALLET · {shortAddr(plan.serverWalletAddress)} ·{" "}
+        EXEC WALLET ·{" "}
+        <span title={plan.serverWalletAddress} style={{ cursor: "help" }}>
+          {shortAddr(plan.serverWalletAddress)}
+        </span>{" "}
+        ·{" "}
         <span style={{ color: plan.liveFraction === 1 ? C.accent : C.warn }}>
           {Math.round(plan.liveFraction * 100)}% LIVE
         </span>
