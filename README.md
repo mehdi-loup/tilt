@@ -1,6 +1,6 @@
 # tilt
 
-A single-question crypto investing app: **how loud do you want to be?**
+A single-question crypto investing app: **how much risk do you like?**
 
 The user drags one dial (0–100). That risk score maps to one of five discrete strategy profiles (Stable Lender → Max Speculation), each with an allocation across eight asset classes and a routing map of execution venues per class. Live APYs are blended from DefiLlama and rendered next to each venue.
 
