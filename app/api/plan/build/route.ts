@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { authenticate } from "@/lib/privy-server";
 import { getOrProvisionServerWallet } from "@/lib/wallet-registry";
-import { buildPlan, type ClientTx } from "@/lib/strategy-plan";
+import { buildPlan, GAS_FUNDING_WEI, type ClientTx } from "@/lib/strategy-plan";
 import { FUNDING_CAIP2, TOKENS, usdcUnits } from "@/lib/chains";
 import { callWayfinder } from "@/lib/wayfinder-sidecar";
 import { createExecution } from "@/lib/execution-ledger";
@@ -40,29 +40,6 @@ async function serverWalletBalances(
     call("eth_getBalance", [address, "latest"]),
   ]);
   return { usdc: BigInt(usdcHex), eth: BigInt(ethHex) };
-}
-
-// Gas float: enough native ETH for the server wallet to pay Base gas on the
-// strategy deposit. Denominated in USD and priced to wei at build time so the
-// bar tracks real gas cost instead of a fixed ETH amount that drifts with price.
-const GAS_FLOAT_USD = 0.5;
-const FALLBACK_ETH_USD = 3000;
-
-async function ethPriceUsd(): Promise<number> {
-  try {
-    const res = await fetch(
-      "https://coins.llama.fi/prices/current/coingecko:ethereum",
-      { cache: "no-store" },
-    );
-    if (!res.ok) return FALLBACK_ETH_USD;
-    const body = (await res.json()) as {
-      coins?: Record<string, { price?: number }>;
-    };
-    const price = body.coins?.["coingecko:ethereum"]?.price;
-    return typeof price === "number" && price > 0 ? price : FALLBACK_ETH_USD;
-  } catch {
-    return FALLBACK_ETH_USD;
-  }
 }
 
 /**
@@ -123,9 +100,10 @@ export async function POST(req: Request) {
     );
   }
   const shortfallUnits = target > serverUsdc ? target - serverUsdc : 0n;
-  const ethUsd = await ethPriceUsd();
-  const gasFloatWei = BigInt(Math.round((GAS_FLOAT_USD / ethUsd) * 1e6)) * 10n ** 12n;
-  const includeGasFloat = serverEth < gasFloatWei;
+  // Gas is a fixed-wei requirement (the rotator needs >= ~0.0005 ETH on Base),
+  // so the float is a fixed amount, not a USD value that undershoots when ETH
+  // is expensive.
+  const includeGasFloat = serverEth < GAS_FUNDING_WEI;
 
   // Nothing to move — server wallet already holds the amount + gas.
   if (shortfallUnits === 0n && !includeGasFloat) {
@@ -178,7 +156,6 @@ export async function POST(req: Request) {
     serverWalletAddress: wallet.address,
     fundingTxs,
     includeGasFloat,
-    gasFloatWei,
   });
 
   // Persist the execution — including the Wayfinder-built funding txs and
