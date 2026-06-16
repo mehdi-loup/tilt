@@ -6,9 +6,7 @@
 //
 // Strategies that need funds on another chain (Arbitrum, HyperEVM) are still
 // funded on Base: the sidecar self-bridges the server wallet's Base USDC to
-// the target chain (BRAP, Privy-signed) before the strategy runs. The
-// minimums mirror api/wayfinder/execute.py's STRATEGY_SPECS — strategy
-// minimum plus bridging/gas headroom.
+// the target chain (BRAP, Privy-signed) before the strategy runs.
 
 import type { RiskProfileId } from "./tilt";
 
@@ -19,8 +17,6 @@ export interface StrategyInvocation {
   label: string;
   /** Where this strategy runs. */
   chain: "base" | "hyperEVM" | "hyperliquid" | "multi";
-  /** Minimum USDC to invoke. */
-  minAmountUsd: number;
   /** Live = wired through Wayfinder; stub = todo. */
   status: "live" | "stub";
   /** Why a stub step isn't live yet. */
@@ -38,7 +34,6 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         strategyName: "stablecoin_yield_rotator",
         label: "Stablecoin Yield Rotator · Base USDC",
         chain: "base",
-        minAmountUsd: 2,
         status: "live",
       },
     ],
@@ -49,14 +44,12 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         strategyName: "stablecoin_yield_rotator",
         label: "Stablecoin Yield Rotator · Base USDC",
         chain: "base",
-        minAmountUsd: 2,
         status: "live",
       },
       {
         strategyName: "multi_vault_split_strategy",
         label: "Multi-Vault Split · HLP/Boros/Avantis",
         chain: "multi",
-        minAmountUsd: 45,
         status: "live",
       },
     ],
@@ -67,21 +60,18 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         strategyName: "stablecoin_yield_rotator",
         label: "Stablecoin Yield Rotator · Base USDC",
         chain: "base",
-        minAmountUsd: 2,
         status: "live",
       },
       {
         strategyName: "moonwell_wsteth_loop_strategy",
         label: "Moonwell wstETH Loop · Base",
         chain: "base",
-        minAmountUsd: 10,
         status: "live",
       },
       {
         strategyName: "multi_vault_split_strategy",
         label: "Multi-Vault Split · HLP/Boros/Avantis",
         chain: "multi",
-        minAmountUsd: 45,
         status: "live",
       },
     ],
@@ -92,21 +82,18 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         strategyName: "moonwell_wsteth_loop_strategy",
         label: "Moonwell wstETH Loop · Base",
         chain: "base",
-        minAmountUsd: 10,
         status: "live",
       },
       {
         strategyName: "basis_trading_strategy",
         label: "Basis Trading · Hyperliquid",
         chain: "hyperliquid",
-        minAmountUsd: 30,
         status: "live",
       },
       {
         strategyName: "projectx_thbill_usdc_strategy",
         label: "ProjectX THBILL/USDC · HyperEVM",
         chain: "hyperEVM",
-        minAmountUsd: 15,
         status: "live",
       },
     ],
@@ -117,21 +104,18 @@ export const PROFILE_COMPOSITION: Record<RiskProfileId, ProfileComposition> = {
         strategyName: "moonwell_wsteth_loop_strategy",
         label: "Moonwell wstETH Loop · Base",
         chain: "base",
-        minAmountUsd: 10,
         status: "live",
       },
       {
         strategyName: "basis_trading_strategy",
         label: "Basis Trading · Hyperliquid",
         chain: "hyperliquid",
-        minAmountUsd: 30,
         status: "live",
       },
       {
         strategyName: "boros_hype_strategy",
         label: "Boros HYPE · multi-chain",
         chain: "multi",
-        minAmountUsd: 160,
         status: "live",
       },
     ],

@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { authenticate } from "@/lib/privy-server";
 import { getOrProvisionServerWallet } from "@/lib/wallet-registry";
-import { buildPlan, GAS_FUNDING_WEI, type ClientTx } from "@/lib/strategy-plan";
-import { FUNDING_CAIP2, FUNDING_CHAIN_ID, RPC_URLS, TOKENS, usdcUnits } from "@/lib/chains";
+import { buildPlan, type ClientTx } from "@/lib/strategy-plan";
+import { FUNDING_CAIP2, TOKENS, usdcUnits } from "@/lib/chains";
 import { callWayfinder } from "@/lib/wayfinder-sidecar";
 import { createExecution } from "@/lib/execution-ledger";
 
@@ -11,34 +11,57 @@ export const dynamic = "force-dynamic";
 /** The server (execution) wallet's current Base USDC + native ETH balances.
  * Used to fund only the shortfall and skip the gas float when already present,
  * so changing the amount or retrying doesn't re-move funds already delivered.
- * Returns zeros on RPC failure (→ full funding, never under-funds). */
+ *
+ * Throws on RPC failure: silently reading 0 would over-fund a wallet that may
+ * already hold the funds, so the caller refuses to plan from an unknown
+ * balance. Reads go through BASE_RPC_URL (a keyed provider in production); the
+ * public default works locally but rate-limits serverless IPs. */
 async function serverWalletBalances(
   address: string,
 ): Promise<{ usdc: bigint; eth: bigint }> {
-  const rpc = RPC_URLS[FUNDING_CHAIN_ID];
-  if (!rpc) return { usdc: 0n, eth: 0n };
-  const call = async (method: string, params: unknown[]) => {
+  const rpc = process.env.BASE_RPC_URL ?? "https://base-rpc.publicnode.com";
+  const call = async (method: string, params: unknown[]): Promise<string> => {
     const res = await fetch(rpc, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
       cache: "no-store",
     });
+    if (!res.ok) throw new Error(`Base RPC ${method} HTTP ${res.status}`);
     const body = (await res.json().catch(() => null)) as { result?: string } | null;
-    return body?.result;
+    if (typeof body?.result !== "string") {
+      throw new Error(`Base RPC ${method} returned no result`);
+    }
+    return body.result;
   };
+  const balData = `0x70a08231${address.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
+  const [usdcHex, ethHex] = await Promise.all([
+    call("eth_call", [{ to: TOKENS.USDC, data: balData }, "latest"]),
+    call("eth_getBalance", [address, "latest"]),
+  ]);
+  return { usdc: BigInt(usdcHex), eth: BigInt(ethHex) };
+}
+
+// Gas float: enough native ETH for the server wallet to pay Base gas on the
+// strategy deposit. Denominated in USD and priced to wei at build time so the
+// bar tracks real gas cost instead of a fixed ETH amount that drifts with price.
+const GAS_FLOAT_USD = 0.5;
+const FALLBACK_ETH_USD = 3000;
+
+async function ethPriceUsd(): Promise<number> {
   try {
-    const balData = `0x70a08231${address.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
-    const [usdcHex, ethHex] = await Promise.all([
-      call("eth_call", [{ to: TOKENS.USDC, data: balData }, "latest"]),
-      call("eth_getBalance", [address, "latest"]),
-    ]);
-    return {
-      usdc: usdcHex ? BigInt(usdcHex) : 0n,
-      eth: ethHex ? BigInt(ethHex) : 0n,
+    const res = await fetch(
+      "https://coins.llama.fi/prices/current/coingecko:ethereum",
+      { cache: "no-store" },
+    );
+    if (!res.ok) return FALLBACK_ETH_USD;
+    const body = (await res.json()) as {
+      coins?: Record<string, { price?: number }>;
     };
+    const price = body.coins?.["coingecko:ethereum"]?.price;
+    return typeof price === "number" && price > 0 ? price : FALLBACK_ETH_USD;
   } catch {
-    return { usdc: 0n, eth: 0n };
+    return FALLBACK_ETH_USD;
   }
 }
 
@@ -88,9 +111,21 @@ export async function POST(req: Request) {
   // holds (from a prior run / a different amount), so we never re-move funds
   // that are already there.
   const target = usdcUnits(body.amountUsd);
-  const { usdc: serverUsdc, eth: serverEth } = await serverWalletBalances(wallet.address);
+  let serverUsdc: bigint;
+  let serverEth: bigint;
+  try {
+    ({ usdc: serverUsdc, eth: serverEth } = await serverWalletBalances(wallet.address));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "balance read failed";
+    return NextResponse.json(
+      { error: `couldn't read execution wallet balance: ${message}` },
+      { status: 502 },
+    );
+  }
   const shortfallUnits = target > serverUsdc ? target - serverUsdc : 0n;
-  const includeGasFloat = serverEth < GAS_FUNDING_WEI;
+  const ethUsd = await ethPriceUsd();
+  const gasFloatWei = BigInt(Math.round((GAS_FLOAT_USD / ethUsd) * 1e6)) * 10n ** 12n;
+  const includeGasFloat = serverEth < gasFloatWei;
 
   // Nothing to move — server wallet already holds the amount + gas.
   if (shortfallUnits === 0n && !includeGasFloat) {
@@ -143,6 +178,7 @@ export async function POST(req: Request) {
     serverWalletAddress: wallet.address,
     fundingTxs,
     includeGasFloat,
+    gasFloatWei,
   });
 
   // Persist the execution — including the Wayfinder-built funding txs and

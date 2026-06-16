@@ -49,8 +49,6 @@ DEFAULT_WAYFINDER_API_BASE_URL = "https://strategies.wayfinder.ai/api/v1"
 #   usdc_token_id     — Wayfinder token id of the target-chain USDC
 #   native_float_wei  — native gas the wallet must hold on the target chain
 #   gas_swap_usd      — Base USDC to spend buying that native gas
-# `min_amount_usd` covers the strategy's own minimum plus prep costs
-# (gas swap + bridge fees), so the post-bridge deposit still clears it.
 ARBITRUM_CHAIN_ID = 42161
 HYPEREVM_CHAIN_ID = 999
 
@@ -62,14 +60,12 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
         "kind": "path",
         "chain": "base",
         "caip2": "eip155:8453",
-        "min_amount_usd": 2.0,
     },
     "stablecoin_yield_strategy": {
         "module": "wayfinder_paths.strategies.stablecoin_yield_strategy.strategy",
         "class_name": "StablecoinYieldStrategy",
         "chain": "base",
         "caip2": "eip155:8453",
-        "min_amount_usd": 2.0,
         # deposit() only stages funds into the strategy wallet; update()
         # actually rotates into the selected yield pool.
         "run_update_after_deposit": True,
@@ -79,7 +75,6 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
         "class_name": "MoonwellWstethLoopStrategy",
         "chain": "base",
         "caip2": "eip155:8453",
-        "min_amount_usd": 10.0,
         # deposit() stages Base USDC/ETH; update() deploys to Moonwell.
         "run_update_after_deposit": True,
     },
@@ -88,8 +83,7 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
         "class_name": "MultiVaultSplitStrategy",
         "chain": "multi",
         "caip2": "eip155:8453",
-        # Strategy minimum is $40 (Arbitrum USDC); headroom for prep costs.
-        "min_amount_usd": 45.0,
+        # Strategy minimum is $40 (Arbitrum USDC).
         # deposit() ends with `return await self.update()` — no second pass.
         "run_update_after_deposit": False,
         "prepare": {
@@ -104,8 +98,7 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
         "class_name": "BasisTradingStrategy",
         "chain": "hyperliquid",
         "caip2": "eip155:8453",
-        # Strategy minimum is $25 (Arbitrum USDC); headroom for prep costs.
-        "min_amount_usd": 30.0,
+        # Strategy minimum is $25 (Arbitrum USDC).
         # deposit() stages Arbitrum USDC; update() bridges to Hyperliquid
         # and opens the positions.
         "run_update_after_deposit": True,
@@ -121,9 +114,7 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
         "class_name": "ProjectXTHBILLUSDCStrategy",
         "chain": "hyperEVM",
         "caip2": "eip155:8453",
-        # Strategy minimum is $5 (HyperEVM USDC); the HYPE gas swap is the
-        # dominant prep cost, hence the larger headroom.
-        "min_amount_usd": 15.0,
+        # Strategy minimum is $5 (HyperEVM USDC).
         # deposit() opens/increases the LP position itself.
         "run_update_after_deposit": False,
         "prepare": {
@@ -139,8 +130,7 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
         "class_name": "BorosHypeStrategy",
         "chain": "multi",
         "caip2": "eip155:8453",
-        # Strategy minimum is $150 (Arbitrum USDC); headroom for prep costs.
-        "min_amount_usd": 160.0,
+        # Strategy minimum is $150 (Arbitrum USDC).
         # deposit() stages funds; update() runs the OPA loop and deploys.
         "run_update_after_deposit": True,
         "prepare": {
