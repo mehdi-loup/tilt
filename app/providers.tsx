@@ -12,8 +12,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
           accentColor: "#c8f56b",
           logo: undefined,
         },
+        // Don't auto-provision an embedded wallet on login — users fund from
+        // their connected external wallet. The modal still creates one on
+        // demand (useCreateWallet) for users without an external wallet.
         embeddedWallets: {
-          ethereum: { createOnLogin: "all-users" },
+          ethereum: { createOnLogin: "off" },
         },
       }}
     >

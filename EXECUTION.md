@@ -59,10 +59,35 @@ Set the same `WAYFINDER_INTERNAL_SECRET`, `WAYFINDER_API_KEY`, and `DATABASE_URL
 
 ## Wallets
 
-- **Funding wallet**: the user-controlled wallet that signs funding transactions. The modal prefers an external connected wallet and falls back to the Privy embedded wallet.
-- **Server wallet**: app-owned Privy wallet provisioned per user. Wayfinder delivers USDC to it, then drives it for strategy deposits through the Privy signing adapter.
+Two wallets, with a deliberate split of control:
 
-`lib/wallet-registry.ts` persists `userId -> walletId` in the Neon Postgres ledger (`server_wallets`, `db/schema.sql`) when `DATABASE_URL` is configured. Local development falls back to an in-process map; production fails closed instead of silently using ephemeral storage. (The old Upstash KV registry is gone — one store.)
+- **Funding wallet** — user-controlled, signs the funding transfer(s). The modal
+  uses the connected **external** wallet; if there is none it creates a Privy
+  **embedded** wallet on demand (`useCreateWallet`). We do **not** auto-create an
+  embedded wallet on login (`createOnLogin: "off"` in `app/providers.tsx`) —
+  empty embedded wallets only confused the funding UX.
+- **Execution (server) wallet** — app-owned Privy wallet provisioned per user
+  (`walletApi.createWallet`, no `owner`). Wayfinder delivers USDC to it, then the
+  sidecar drives it for strategy deposits, signing autonomously via the app's
+  Privy credentials (`walletApi.rpc`). The user never signs strategy txs.
+
+**Why app-owned, not the user's embedded wallet:** execution is server-driven
+(multi-step, background jobs, user gone), so the wallet must be signable by the
+server unattended. Using the embedded wallet would require Privy session
+signers / delegated actions — the user granting the app signing authority over
+their own wallet — which we avoid. The split also bounds risk: only the funded
+amount sits in the execution wallet.
+
+`lib/wallet-registry.ts` persists `userId -> walletId` in the Neon Postgres
+ledger (`server_wallets`, `db/schema.sql`) when `DATABASE_URL` is configured;
+local dev falls back to an in-process map, production fails closed. (The old
+Upstash KV registry is gone — one store.) It also mirrors the address into the
+Privy user's `customMetadata.serverWalletAddress` (once per process, non-fatal)
+so the client reads the execution wallet from the session.
+
+The **wallet chip** (`components/WalletChip.tsx`) shows the external wallet
+address when connected, else the Privy auth identity (email/social); its
+dropdown surfaces the execution wallet read from `customMetadata` — no fetch.
 
 ### Decision: funding wallet signs every funding tx (revisit later)
 
@@ -76,15 +101,19 @@ the cost of moving toward app-delegated custody of the funding wallet.
 
 ## Execution Flow
 
-1. User connects with Privy and chooses a USD amount to invest (25/50/75/100%
-   presets are sized off the wallet's investable balance via
-   `POST /api/plan/balance`).
+1. User connects with Privy and chooses a USD amount. The 25/50/75/100% presets
+   are sized off `POST /api/plan/balance`: the funding wallet's investable USD
+   (Wayfinder `/fund/balance` — holdings on chains where the wallet holds native
+   gas, net of a per-chain gas reserve) **plus** the execution wallet's idle Base
+   USDC (already at the destination, deployable with no funding tx).
 2. User opens `EXECUTE_PLAN`.
 3. Client calls `POST /api/plan/build`.
-4. Server provisions or reuses the server wallet and asks the sidecar to
-   **plan + build the funding transactions** (`POST /fund/plan`): Wayfinder
-   figures out how to move whatever the wallet holds into the server wallet
-   as USDC on Base, and returns the unsigned tx(s). The plan carries them as
+4. Server provisions or reuses the server wallet, reads its current Base USDC +
+   ETH via `BASE_RPC_URL` (fail-loud — a failed read aborts the build rather
+   than over-funding a wallet that may already hold the funds), and asks the
+   sidecar to **plan + build the funding transactions for the shortfall only**
+   (`POST /fund/plan`): Wayfinder figures out how to move whatever the wallet
+   holds into the server wallet as USDC on Base, and returns the unsigned tx(s). The plan carries them as
    `fund-N` steps. The build **persists an `executions` row + `steps` rows**
    (including the built funding txs and quoted amounts) and returns an
    `executionId`. If Wayfinder is unavailable the plan returns without
@@ -176,6 +205,7 @@ the strategy's own minimum (see `STRATEGY_SPECS` in `api/wayfinder/execute.py`).
 | `WAYFINDER_API_KEY` | Required by the Python sidecar for Wayfinder balance/quote API calls |
 | `WAYFINDER_API_BASE_URL` | Optional Wayfinder SDK API host override; defaults to `https://strategies.wayfinder.ai/api/v1` |
 | `DATABASE_URL` | Neon Postgres connection string — required on **both** Vercel (ledger reads/writes) and Cloud Run (sidecar job status writes). Apply `db/schema.sql` once. |
+| `BASE_RPC_URL` | Base JSON-RPC for server-side execution-wallet balance reads (Vercel). Defaults to a public endpoint; set a keyed provider in prod — the public default rate-limits serverless IPs. |
 
 Privy dashboard requirement: server wallet creation must be enabled for the app before production calls to `walletApi.createWallet`.
 
