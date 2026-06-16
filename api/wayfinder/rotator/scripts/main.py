@@ -335,9 +335,13 @@ async def action_deposit(config: dict[str, Any], asset: str, human_amount: float
 
     scan_config = {**config, "assets": [asset]}
     scan = await _scan_all_cached(scan_config)
+    # Same eligibility filter as action_scan and the pre-deposit re-check —
+    # _scan_exclusion_reason enforces min_scan_tvl_usd / max_scan_apy /
+    # utilization / frozen / paused. Without it the APY-sorted pick lands on a
+    # thin low-TVL pool that the re-check then rejects ("target re-check failed").
     candidates = sorted(
         [r for r in scan if r.asset_symbol == asset and r.venue in EXECUTABLE_VENUES
-         and not r.is_frozen and not r.is_paused],
+         and _scan_exclusion_reason(r, config) is None],
         key=lambda r: r.supply_apy,
         reverse=True,
     )
