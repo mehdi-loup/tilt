@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { usePrivy, useWallets } from "@privy-io/react-auth";
+import { usePrivy, useWallets, type User } from "@privy-io/react-auth";
 
 const C = {
   ink: "#f0efe9",
@@ -18,8 +18,23 @@ function truncate(address: string) {
   return `${address.slice(0, 6)}…${address.slice(-4)}`;
 }
 
+// When the user authenticated without an external wallet (email, social,
+// phone), surface that identity rather than the managed Privy embedded wallet.
+function authLabel(user: User | null): string {
+  if (user?.email?.address) return user.email.address;
+  if (user?.google?.email) return user.google.email;
+  if (user?.phone?.number) return user.phone.number;
+  if (user?.twitter?.username) return `@${user.twitter.username}`;
+  if (user?.discord?.username) return user.discord.username;
+  if (user?.github?.username) return user.github.username;
+  if (user?.apple?.email) return user.apple.email;
+  if (user?.farcaster?.username) return user.farcaster.username;
+  if (user?.telegram?.username) return user.telegram.username;
+  return "ACCOUNT";
+}
+
 export function WalletChip() {
-  const { ready, authenticated, login, logout } = usePrivy();
+  const { ready, authenticated, user, login, logout } = usePrivy();
   const { wallets } = useWallets();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -32,13 +47,16 @@ export function WalletChip() {
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  // Show the user's connected (external) wallet — the one they fund from —
-  // and only fall back to the Privy embedded wallet. Mirrors the funding-wallet
-  // selection in TransactionPlanModal.
-  const fundingWallet =
-    wallets.find((w) => w.walletClientType !== "privy") ??
-    wallets.find((w) => w.walletClientType === "privy");
-  const address = fundingWallet?.address;
+  // Execution (server) wallet address — mirrored into the Privy user's custom
+  // metadata at provision time, so we read it from the session, no fetch.
+  const serverMeta = user?.customMetadata?.serverWalletAddress;
+  const serverAddr = typeof serverMeta === "string" ? serverMeta : null;
+
+  // Chip shows the user's connected (external) wallet — the one they fund from.
+  // When they logged in via email/social (no external wallet, only the Privy
+  // embedded one), show how they authenticated instead of the embedded address.
+  const address = wallets.find((w) => w.walletClientType !== "privy")?.address;
+  const label = address ? truncate(address) : authLabel(user);
 
   if (!ready) {
     return (
@@ -58,7 +76,7 @@ export function WalletChip() {
     );
   }
 
-  if (!authenticated || !address) {
+  if (!authenticated) {
     return (
       <button
         onClick={login}
@@ -110,7 +128,7 @@ export function WalletChip() {
             boxShadow: `0 0 6px ${C.accent}`,
           }}
         />
-        <span>{truncate(address)}</span>
+        <span>{label}</span>
       </button>
 
       {open && (
@@ -126,33 +144,84 @@ export function WalletChip() {
             boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
           }}
         >
-          <MenuItem
-            onClick={() => {
-              navigator.clipboard.writeText(address);
-              setOpen(false);
-            }}
-          >
-            COPY ADDRESS
-          </MenuItem>
-          <a
-            href={`https://zapper.xyz/account/${address}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={() => setOpen(false)}
-            style={{
-              display: "block",
-              padding: "10px 14px",
-              fontFamily: C.mono,
-              fontSize: 11,
-              color: C.sub,
-              letterSpacing: 1.2,
-              textDecoration: "none",
-              borderTop: `1px solid ${C.dim}`,
-            }}
-          >
-            VIEW IN ZAPPER ↗
-          </a>
-          <div style={{ borderTop: `1px solid ${C.dim}` }} />
+          {address && (
+            <>
+              <MenuItem
+                onClick={() => {
+                  navigator.clipboard.writeText(address);
+                  setOpen(false);
+                }}
+              >
+                COPY ADDRESS
+              </MenuItem>
+              <a
+                href={`https://zapper.xyz/account/${address}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={() => setOpen(false)}
+                style={{
+                  display: "block",
+                  padding: "10px 14px",
+                  fontFamily: C.mono,
+                  fontSize: 11,
+                  color: C.sub,
+                  letterSpacing: 1.2,
+                  textDecoration: "none",
+                  borderTop: `1px solid ${C.dim}`,
+                }}
+              >
+                VIEW IN ZAPPER ↗
+              </a>
+              <div style={{ borderTop: `1px solid ${C.dim}` }} />
+            </>
+          )}
+          {serverAddr && (
+            <>
+              <div style={{ padding: "10px 14px" }}>
+                <div
+                  style={{
+                    fontFamily: C.mono,
+                    fontSize: 9,
+                    letterSpacing: 1.5,
+                    color: C.sub,
+                    marginBottom: 5,
+                  }}
+                >
+                  EXECUTION WALLET
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span
+                    title={serverAddr}
+                    onClick={() => navigator.clipboard.writeText(serverAddr)}
+                    style={{
+                      fontFamily: C.mono,
+                      fontSize: 11,
+                      color: C.ink,
+                      letterSpacing: 0.6,
+                      cursor: "pointer",
+                    }}
+                  >
+                    {truncate(serverAddr)}
+                  </span>
+                  <a
+                    href={`https://zapper.xyz/account/${serverAddr}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setOpen(false)}
+                    style={{
+                      fontFamily: C.mono,
+                      fontSize: 11,
+                      color: C.sub,
+                      textDecoration: "none",
+                    }}
+                  >
+                    ↗
+                  </a>
+                </div>
+              </div>
+              <div style={{ borderTop: `1px solid ${C.dim}` }} />
+            </>
+          )}
           <MenuItem
             onClick={() => {
               logout();
