@@ -25,9 +25,26 @@ export interface ServerWallet {
 // (local dev) this map is the store of record instead of just a cache.
 const localCache = new Map<string, ServerWallet>();
 
+// Mirror the server-wallet address into the Privy user's custom metadata so the
+// client reads it straight from the session (no extra fetch). Once per process
+// per user; non-fatal — Postgres stays the source of truth.
+const metadataMirrored = new Set<string>();
+async function mirrorAddressToPrivy(userId: string, address: string): Promise<void> {
+  if (metadataMirrored.has(userId)) return;
+  try {
+    await privy.setCustomMetadata(userId, { serverWalletAddress: address });
+    metadataMirrored.add(userId);
+  } catch {
+    // Non-fatal: the chip simply won't show the execution wallet this session.
+  }
+}
+
 export async function getOrProvisionServerWallet(userId: string): Promise<ServerWallet> {
   const existing = await lookupServerWallet(userId);
-  if (existing) return existing;
+  if (existing) {
+    await mirrorAddressToPrivy(userId, existing.address);
+    return existing;
+  }
 
   requireDbInProduction("The server-wallet registry");
 
@@ -40,6 +57,7 @@ export async function getOrProvisionServerWallet(userId: string): Promise<Server
 
   if (!dbConfigured) {
     localCache.set(userId, entry);
+    await mirrorAddressToPrivy(userId, entry.address);
     return entry;
   }
 
@@ -58,9 +76,11 @@ export async function getOrProvisionServerWallet(userId: string): Promise<Server
     );
     const winner = await lookupServerWallet(userId);
     if (!winner) throw new Error("server-wallet registry write race resolution failed");
+    await mirrorAddressToPrivy(userId, winner.address);
     return winner;
   }
   localCache.set(userId, entry);
+  await mirrorAddressToPrivy(userId, entry.address);
   return entry;
 }
 
