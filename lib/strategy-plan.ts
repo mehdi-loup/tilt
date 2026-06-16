@@ -95,6 +95,9 @@ interface BuildArgs {
   /** Include the ETH gas-float step. Omitted when the server wallet already
    * holds enough Base gas (e.g. on a retry). */
   includeGasFloat?: boolean;
+  /** Native-ETH gas float to send, in wei. The build route prices this from a
+   * USD target; defaults to GAS_FUNDING_WEI when not supplied. */
+  gasFloatWei?: bigint;
 }
 
 export function buildPlan({
@@ -104,11 +107,13 @@ export function buildPlan({
   serverWalletAddress,
   fundingTxs,
   includeGasFloat,
+  gasFloatWei,
 }: BuildArgs): Plan {
   const profile = profileFor(risk);
   const composition = PROFILE_COMPOSITION[profile.id];
   const totalUnits = BigInt(Math.round(amountUsd * 1_000_000)); // USDC base units
   const executable = isProfileExecutable(profile.id);
+  const gasWei = gasFloatWei ?? GAS_FUNDING_WEI;
 
   const steps: PlanStep[] = [];
 
@@ -119,9 +124,9 @@ export function buildPlan({
       steps.push({
         id: "fund-gas",
         kind: "fund",
-        label: `Fund gas · ${formatEth(GAS_FUNDING_WEI)} ETH`,
+        label: `Fund gas · ${formatEth(gasWei)} ETH`,
         description: `Transfer ${formatEth(
-          GAS_FUNDING_WEI,
+          gasWei,
         )} ETH on Base so the execution wallet can pay gas for Wayfinder transactions.`,
         signer: "embedded",
         status: "live",
@@ -129,7 +134,7 @@ export function buildPlan({
         tx: {
           to: serverWalletAddress,
           data: "0x",
-          value: `0x${GAS_FUNDING_WEI.toString(16)}`,
+          value: `0x${gasWei.toString(16)}`,
           chainId: FUNDING_CHAIN_ID,
         },
       });
