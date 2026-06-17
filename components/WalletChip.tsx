@@ -39,6 +39,7 @@ export function WalletChip() {
   const { connectWallet } = useConnectWallet();
   const { wallets } = useWallets();
   const [open, setOpen] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const [withdrawing, setWithdrawing] = useState(false);
   const [withdrawMsg, setWithdrawMsg] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
@@ -66,7 +67,6 @@ export function WalletChip() {
   // to the connected wallet. Server-driven; the user just authorizes via JWT.
   async function withdraw() {
     if (!address || withdrawing) return;
-    if (!window.confirm(`Withdraw your position + idle USDC to ${truncate(address)}?`)) return;
     setWithdrawing(true);
     setWithdrawMsg(null);
     try {
@@ -193,22 +193,15 @@ export function WalletChip() {
             <>
               <WalletSection label="EXECUTION WALLET" address={serverAddr} close={() => setOpen(false)}>
                 {address && (
-                  <MenuItem onClick={withdraw}>
-                    {withdrawing ? "WITHDRAWING…" : `WITHDRAW → ${truncate(address)}`}
-                  </MenuItem>
-                )}
-                {withdrawMsg && (
-                  <div
-                    style={{
-                      padding: "0 14px 10px",
-                      fontFamily: C.mono,
-                      fontSize: 10,
-                      color: C.sub,
-                      letterSpacing: 1,
+                  <MenuItem
+                    onClick={() => {
+                      setWithdrawMsg(null);
+                      setOpen(false);
+                      setConfirmOpen(true);
                     }}
                   >
-                    {withdrawMsg}
-                  </div>
+                    {`WITHDRAW → ${truncate(address)}`}
+                  </MenuItem>
                 )}
               </WalletSection>
               <div style={{ borderTop: `1px solid ${C.dim}` }} />
@@ -225,8 +218,98 @@ export function WalletChip() {
           </MenuItem>
         </div>
       )}
+
+      {confirmOpen && (
+        <div
+          onClick={() => !withdrawing && setConfirmOpen(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 100,
+            background: "rgba(0,0,0,0.6)",
+            backdropFilter: "blur(2px)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 16,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: 380,
+              background: C.panel,
+              border: `1px solid ${C.dim2}`,
+              borderRadius: 6,
+              padding: 24,
+              fontFamily: C.mono,
+              boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
+            }}
+          >
+            <div style={{ fontSize: 12, letterSpacing: 2, color: C.accent, marginBottom: 14 }}>
+              WITHDRAW
+            </div>
+            {withdrawMsg ? (
+              <>
+                <div style={{ fontSize: 12, lineHeight: 1.6, color: C.ink, marginBottom: 22 }}>
+                  {withdrawMsg}
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                  <button
+                    onClick={() => {
+                      setConfirmOpen(false);
+                      setWithdrawMsg(null);
+                    }}
+                    style={confirmBtn(false)}
+                  >
+                    CLOSE
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 12, lineHeight: 1.6, color: C.sub, marginBottom: 22 }}>
+                  This unwinds your rotator position and empties the execution
+                  wallet — all idle USDC and remaining ETH gas — back to your
+                  connected wallet{address ? ` (${truncate(address)})` : ""}.
+                </div>
+                <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                  <button
+                    onClick={() => setConfirmOpen(false)}
+                    disabled={withdrawing}
+                    style={confirmBtn(false, withdrawing)}
+                  >
+                    CANCEL
+                  </button>
+                  <button onClick={withdraw} disabled={withdrawing} style={confirmBtn(true, withdrawing)}>
+                    {withdrawing ? "WITHDRAWING…" : "WITHDRAW"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+// Confirm-dialog button styles: `primary` is the accent-filled action.
+function confirmBtn(primary: boolean, busy = false): React.CSSProperties {
+  return {
+    fontFamily: C.mono,
+    fontSize: 11,
+    letterSpacing: 1.2,
+    padding: "9px 18px",
+    borderRadius: 4,
+    cursor: busy ? "default" : "pointer",
+    opacity: busy ? 0.6 : 1,
+    background: primary ? C.accent : "transparent",
+    border: `1px solid ${primary ? C.accent : C.dim2}`,
+    color: primary ? C.panel : C.sub,
+    fontWeight: primary ? 600 : 400,
+  };
 }
 
 // A labelled wallet block: address + copy + Zapper link, plus any extra

@@ -14,7 +14,8 @@ export const maxDuration = 300;
  * connected wallet). Auth: `Authorization: Bearer <privy-access-token>`.
  *
  * Liquidates the user's rotator positions back to USDC in their execution
- * wallet and sweeps all idle Base USDC to `recipient`. The sidecar re-verifies
+ * wallet, then empties that wallet to `recipient`: sweeps all idle Base USDC
+ * and then the remaining Base ETH gas (down to dust). The sidecar re-verifies
  * the user JWT and derives the execution wallet from it — the client cannot
  * specify which wallet to drain.
  */

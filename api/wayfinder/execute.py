@@ -990,6 +990,51 @@ async def run_rotator(
     return out
 
 
+async def _sweep_native(
+    *,
+    wallet_id: str,
+    wallet_address: str,
+    recipient: str,
+    caip2: str,
+    after_tx: str | None = None,
+) -> tuple[str | None, int]:
+    """Sweep the execution wallet's remaining Base ETH to `recipient`, emptying
+    it down to the unavoidable EIP-1559 base-fee dust. `after_tx` (the USDC
+    sweep) is waited on first so the native balance reflects the gas it spent.
+    Returns (tx_hash | None, swept_wei); None when there's nothing above gas."""
+    from wayfinder_paths.core.utils.web3 import web3_from_chain_id
+
+    async with web3_from_chain_id(BASE_CHAIN_ID) as w3:
+        if after_tx:
+            await w3.eth.wait_for_transaction_receipt(after_tx, timeout=120)
+        balance = int(await w3.eth.get_balance(w3.to_checksum_address(wallet_address)))
+        base_fee = int((await w3.eth.get_block("latest"))["baseFeePerGas"])
+        try:
+            priority = int(await w3.eth.max_priority_fee)
+        except Exception:
+            priority = 1_000_000  # 0.001 gwei fallback if eth_maxPriorityFeePerGas is unsupported
+
+    gas_limit = 21_000  # plain ETH transfer
+    # Reserve the 1559 fee cap (2*base + priority); the refund leaves only the
+    # ~21000*base_fee the transfer itself burns, so the wallet ends ~empty.
+    max_fee = base_fee * 2 + priority
+    value = balance - gas_limit * max_fee
+    if value <= 0:
+        return None, 0
+    tx_hash = await privy_send_transaction(
+        wallet_id,
+        caip2,
+        {
+            "to": recipient,
+            "value": hex(value),
+            "gas": gas_limit,
+            "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority,
+        },
+    )
+    return tx_hash, value
+
+
 async def run_rotator_withdraw(
     *,
     wallet_id: str,
@@ -997,8 +1042,9 @@ async def run_rotator_withdraw(
     recipient: str,
     caip2: str,
 ) -> dict[str, Any]:
-    """Liquidate the rotator's Base positions back to USDC, then sweep all idle
-    USDC in the server wallet to `recipient` (the user's connected wallet)."""
+    """Liquidate the rotator's Base positions back to USDC, then empty the
+    server wallet to `recipient` (the user's connected wallet): sweep all idle
+    USDC, then sweep the remaining Base ETH gas down to dust."""
     if caip2 != DEFAULT_CAIP2:
         raise ValueError(f"withdraw supports {DEFAULT_CAIP2}, got {caip2}")
     _configure_wayfinder_sdk()
@@ -1041,14 +1087,34 @@ async def run_rotator_withdraw(
             },
         )
 
+    # 3. Sweep the remaining Base ETH (gas) so the execution wallet is left
+    #    empty. The USDC sweep above spends gas, so _sweep_native waits for it to
+    #    mine before reading the balance. Best-effort: a failure here must not
+    #    undo the USDC withdrawal the user already authorized.
+    native_tx: str | None = None
+    native_wei = 0
+    native_error: str | None = None
+    try:
+        native_tx, native_wei = await _sweep_native(
+            wallet_id=wallet_id,
+            wallet_address=wallet_address,
+            recipient=recipient,
+            caip2=caip2,
+            after_tx=sweep_tx,
+        )
+    except Exception as exc:  # noqa: BLE001 — non-fatal; USDC already swept
+        native_error = str(exc)
+
     return {
         "success": True,
         "status": {
             "withdraw": _jsonable(withdraw_result),
             "sweptUsdcUnits": usdc_units,
+            "sweptNativeWei": native_wei,
+            **({"nativeSweepError": native_error} if native_error else {}),
             "recipient": recipient,
         },
-        "txHashes": [sweep_tx] if sweep_tx else [],
+        "txHashes": [t for t in (sweep_tx, native_tx) if t],
     }
 
 
