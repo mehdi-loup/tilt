@@ -34,9 +34,11 @@ function authLabel(user: User | null): string {
 }
 
 export function WalletChip() {
-  const { ready, authenticated, user, login, logout } = usePrivy();
+  const { ready, authenticated, user, getAccessToken, login, logout } = usePrivy();
   const { wallets } = useWallets();
   const [open, setOpen] = useState(false);
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [withdrawMsg, setWithdrawMsg] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -57,6 +59,30 @@ export function WalletChip() {
   // embedded one), show how they authenticated instead of the embedded address.
   const address = wallets.find((w) => w.walletClientType !== "privy")?.address;
   const label = address ? truncate(address) : authLabel(user);
+
+  // Unwind the rotator position + sweep idle USDC from the execution wallet back
+  // to the connected wallet. Server-driven; the user just authorizes via JWT.
+  async function withdraw() {
+    if (!address || withdrawing) return;
+    if (!window.confirm(`Withdraw your position + idle USDC to ${truncate(address)}?`)) return;
+    setWithdrawing(true);
+    setWithdrawMsg(null);
+    try {
+      const jwt = await getAccessToken();
+      const res = await fetch("/api/plan/withdraw", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ recipient: address }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { txHashes?: string[]; error?: string };
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      setWithdrawMsg((body.txHashes?.length ?? 0) > 0 ? "Withdrawn ✓" : "Nothing to withdraw");
+    } catch (e) {
+      setWithdrawMsg(e instanceof Error ? e.message : "withdraw failed");
+    } finally {
+      setWithdrawing(false);
+    }
+  }
 
   if (!ready) {
     return (
@@ -219,6 +245,24 @@ export function WalletChip() {
                   </a>
                 </div>
               </div>
+              {address && (
+                <MenuItem onClick={withdraw}>
+                  {withdrawing ? "WITHDRAWING…" : `WITHDRAW → ${truncate(address)}`}
+                </MenuItem>
+              )}
+              {withdrawMsg && (
+                <div
+                  style={{
+                    padding: "0 14px 10px",
+                    fontFamily: C.mono,
+                    fontSize: 10,
+                    color: C.sub,
+                    letterSpacing: 1,
+                  }}
+                >
+                  {withdrawMsg}
+                </div>
+              )}
               <div style={{ borderTop: `1px solid ${C.dim}` }} />
             </>
           )}

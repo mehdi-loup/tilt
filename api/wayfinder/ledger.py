@@ -31,6 +31,21 @@ async def _pool() -> Any:
     return _POOL
 
 
+async def server_wallet_for_user(user_id: str) -> tuple[str, str] | None:
+    """Canonical (wallet_id, address) for a user from the registry — the
+    authoritative binding for fund-moving endpoints. None if unset or no row."""
+    if not enabled():
+        return None
+    pool = await _pool()
+    row = await pool.fetchrow(
+        "select wallet_id, address from server_wallets where user_id = $1",
+        user_id,
+    )
+    if row is None:
+        return None
+    return str(row["wallet_id"]), str(row["address"])
+
+
 async def update_step(
     execution_id: str,
     step_id: str,

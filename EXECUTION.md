@@ -200,6 +200,7 @@ the strategy's own minimum (see `STRATEGY_SPECS` in `api/wayfinder/execute.py`).
 | --- | --- |
 | `NEXT_PUBLIC_PRIVY_APP_ID` | Client-side Privy app id |
 | `PRIVY_APP_SECRET` | Server-side Privy auth (signing adapter) |
+| `PRIVY_VERIFICATION_KEY` | ES256 PEM (Privy dashboard → JWT). Required on the **sidecar** to verify the user JWT and bind the execution wallet to the authenticated user for `/wallet/withdraw`. |
 | `WAYFINDER_INTERNAL_SECRET` | **Required** Next.js -> sidecar shared secret (no fallback) |
 | `WAYFINDER_SIDECAR_URL` | Required in Vercel production/preview; Cloud Run sidecar URL |
 | `WAYFINDER_API_KEY` | Required by the Python sidecar for Wayfinder balance/quote API calls |
