@@ -135,6 +135,7 @@ export async function POST(req: Request) {
       fromAddress: body.embeddedWalletAddress,
       recipientAddress: wallet.address,
       caip2: FUNDING_CAIP2,
+      serverGasWei: serverEth.toString(),
     });
 
     if (!planned.ok || !planned.payload.ok || !planned.payload.txs?.length) {
