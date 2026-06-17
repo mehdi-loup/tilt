@@ -109,6 +109,7 @@ async def fund_balance(body: dict[str, Any], _jwt: str = Depends(_auth)):
             target_usdc_units=0,
             amount_usd=None,
             target_caip2=body.get("caip2", execute.DEFAULT_CAIP2),
+            server_gas_wei=int(body.get("serverGasWei") or 0),
         )
     except Exception as exc:  # noqa: BLE001
         return _engine_error(exc)

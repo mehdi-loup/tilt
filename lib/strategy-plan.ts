@@ -187,7 +187,13 @@ export function buildPlan({
   };
 }
 
-export const GAS_FUNDING_WEI = 1_000_000_000_000_000n;
+export const GAS_FUNDING_WEI = 1_000_000_000_000_000n; // 0.001 ETH — top-up target
+
+// Below this, the execution wallet needs a gas top-up. It's the strategies'
+// operational floor (the rotator rejects below ~0.0005 ETH), not the 0.001 ETH
+// gas maximum — a wallet already above it pays its own Base gas and needs no
+// float, so we don't move ETH it doesn't need.
+export const GAS_FLOAT_TRIGGER_WEI = 500_000_000_000_000n; // 0.0005 ETH
 
 function formatEth(wei: bigint): string {
   const whole = wei / 1_000_000_000_000_000_000n;

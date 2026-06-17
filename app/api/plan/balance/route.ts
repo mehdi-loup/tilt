@@ -6,32 +6,37 @@ import { lookupServerWallet } from "@/lib/wallet-registry";
 
 export const dynamic = "force-dynamic";
 
-/** The server wallet's idle Base USDC, in USD. It's already at the funding
- * destination, so it's deployable with no funding tx and counts toward the
- * investable total. Non-fatal: a read failure just omits the bonus. */
-async function serverWalletIdleUsd(userId: string): Promise<number> {
+/** The execution wallet's idle Base USDC (in USD) and native ETH gas (wei).
+ * The idle USDC is already at the funding destination, so it counts toward the
+ * investable total; the gas balance tells the sidecar whether a gas float is
+ * still owed. Non-fatal: a read failure returns zeros. */
+async function serverWalletState(userId: string): Promise<{ idleUsd: number; gasWei: bigint }> {
   const wallet = await lookupServerWallet(userId);
-  if (!wallet) return 0;
+  if (!wallet) return { idleUsd: 0, gasWei: 0n };
   const rpc = process.env.BASE_RPC_URL ?? "https://base-rpc.publicnode.com";
-  try {
-    const data = `0x70a08231${wallet.address.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
+  const call = async (method: string, params: unknown[]): Promise<string | null> => {
     const res = await fetch(rpc, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_call",
-        params: [{ to: TOKENS.USDC, data }, "latest"],
-      }),
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
       cache: "no-store",
     });
-    if (!res.ok) return 0;
+    if (!res.ok) return null;
     const body = (await res.json().catch(() => null)) as { result?: string } | null;
-    if (typeof body?.result !== "string") return 0;
-    return Number(BigInt(body.result)) / 1e6; // USDC has 6 decimals
+    return typeof body?.result === "string" ? body.result : null;
+  };
+  try {
+    const data = `0x70a08231${wallet.address.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
+    const [usdcHex, ethHex] = await Promise.all([
+      call("eth_call", [{ to: TOKENS.USDC, data }, "latest"]),
+      call("eth_getBalance", [wallet.address, "latest"]),
+    ]);
+    return {
+      idleUsd: usdcHex ? Number(BigInt(usdcHex)) / 1e6 : 0, // USDC has 6 decimals
+      gasWei: ethHex ? BigInt(ethHex) : 0n,
+    };
   } catch {
-    return 0;
+    return { idleUsd: 0, gasWei: 0n };
   }
 }
 
@@ -57,9 +62,11 @@ export async function POST(req: Request) {
   }
 
   const origin = new URL(req.url).origin;
+  const server = await serverWalletState(user.userId);
   const { ok, status, payload } = await callWayfinder(origin, user.jwt, "/fund/balance", {
     fromAddress: body.embeddedWalletAddress,
     caip2: FUNDING_CAIP2,
+    serverGasWei: server.gasWei.toString(),
   });
   if (!ok || !payload.ok) {
     return NextResponse.json(
@@ -79,8 +86,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const serverIdleUsd = await serverWalletIdleUsd(user.userId);
-  const investableUsd = payload.investableUsd + serverIdleUsd;
+  const investableUsd = payload.investableUsd + server.idleUsd;
   // The wallet holds funds but not the Base ETH gas float every plan needs to
   // begin, so nothing is investable. Surface that instead of a bare $0.
   const needsBaseGas =

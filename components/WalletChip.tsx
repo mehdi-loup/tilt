@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { usePrivy, useUser, useWallets, type User } from "@privy-io/react-auth";
+import { useConnectWallet, usePrivy, useUser, useWallets, type User } from "@privy-io/react-auth";
 
 const C = {
   ink: "#f0efe9",
@@ -36,6 +36,7 @@ function authLabel(user: User | null): string | null {
 export function WalletChip() {
   const { ready, authenticated, user, getAccessToken, login, logout } = usePrivy();
   const { refreshUser } = useUser();
+  const { connectWallet } = useConnectWallet();
   const { wallets } = useWallets();
   const [open, setOpen] = useState(false);
   const [withdrawing, setWithdrawing] = useState(false);
@@ -103,12 +104,14 @@ export function WalletChip() {
     );
   }
 
-  // No external wallet and no recognized auth identity → nothing to show;
-  // fall back to the connect action rather than a placeholder label.
+  // No external wallet and no recognized auth identity → nothing to label.
+  // If a session already exists (e.g. a previously linked wallet that isn't
+  // connected this session), connect a wallet — calling login() while
+  // authenticated throws "already logged in". Otherwise log in.
   if (!authenticated || !label) {
     return (
       <button
-        onClick={login}
+        onClick={() => (authenticated ? connectWallet() : login())}
         style={{
           fontFamily: C.mono,
           fontSize: 11,

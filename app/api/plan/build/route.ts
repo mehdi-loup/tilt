@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { authenticate } from "@/lib/privy-server";
 import { getOrProvisionServerWallet } from "@/lib/wallet-registry";
-import { buildPlan, GAS_FUNDING_WEI, type ClientTx } from "@/lib/strategy-plan";
+import { buildPlan, GAS_FLOAT_TRIGGER_WEI, type ClientTx } from "@/lib/strategy-plan";
 import { FUNDING_CAIP2, TOKENS, usdcUnits } from "@/lib/chains";
 import { callWayfinder } from "@/lib/wayfinder-sidecar";
 import { createExecution } from "@/lib/execution-ledger";
@@ -100,10 +100,11 @@ export async function POST(req: Request) {
     );
   }
   const shortfallUnits = target > serverUsdc ? target - serverUsdc : 0n;
-  // Gas is a fixed-wei requirement (the rotator needs >= ~0.0005 ETH on Base),
-  // so the float is a fixed amount, not a USD value that undershoots when ETH
-  // is expensive.
-  const includeGasFloat = serverEth < GAS_FUNDING_WEI;
+  // Only top up gas when the execution wallet is below the strategies'
+  // operational floor (~0.0005 ETH). Above it the wallet pays its own Base
+  // deposit gas — the strategy invests USDC, ETH is only gas — so we never move
+  // ETH it doesn't need.
+  const includeGasFloat = serverEth < GAS_FLOAT_TRIGGER_WEI;
 
   // Nothing to move — server wallet already holds the amount + gas.
   if (shortfallUnits === 0n && !includeGasFloat) {
