@@ -43,7 +43,7 @@ function wayfinderSidecarUrl(origin: string, path: string): string {
 export async function callWayfinder(
   origin: string,
   jwt: string,
-  path: "/fund/plan" | "/fund/balance" | "/strategy/run",
+  path: "/fund/plan" | "/fund/balance" | "/strategy/run" | "/wallet/withdraw",
   body: Record<string, unknown>,
 ): Promise<{ ok: boolean; status: number; payload: WayfinderResult }> {
   const secret = wayfinderInternalSecret();

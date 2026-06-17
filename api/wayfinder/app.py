@@ -115,6 +115,25 @@ async def fund_balance(body: dict[str, Any], _jwt: str = Depends(_auth)):
     return {"ok": True, "source": "live", **result}
 
 
+@app.post("/wallet/withdraw")
+async def wallet_withdraw(body: dict[str, Any], _jwt: str = Depends(_auth)):
+    wallet_id = body.get("walletId")
+    wallet_address = body.get("walletAddress")
+    recipient = body.get("recipient")
+    if not (wallet_id and wallet_address and recipient):
+        raise HTTPException(400, "walletId, walletAddress, recipient required")
+    try:
+        result = await execute.run_rotator_withdraw(
+            wallet_id=wallet_id,
+            wallet_address=wallet_address,
+            recipient=recipient,
+            caip2=body.get("caip2", execute.DEFAULT_CAIP2),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _engine_error(exc)
+    return {"ok": True, "source": "live", **result}
+
+
 # ─── Strategy runs ─────────────────────────────────────────────────────────
 
 # In-memory job mirror for debugging; the Postgres ledger is the source of

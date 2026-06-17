@@ -329,6 +329,40 @@ def make_privy_sign_callback(
     return sign_callback
 
 
+async def privy_send_transaction(wallet_id: str, caip2: str, tx: dict[str, Any]) -> str:
+    """Sign **and broadcast** `tx` from a Privy server wallet via
+    eth_sendTransaction (the sign_callback above only signs — the sweep needs
+    Privy to submit too). Privy fills nonce/gas and returns the broadcast hash.
+    `caip2` selects the chain to broadcast on."""
+    import httpx
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{PRIVY_API_BASE}/v1/wallets/{wallet_id}/rpc",
+            headers={"privy-app-id": PRIVY_APP_ID},
+            auth=(PRIVY_APP_ID, PRIVY_APP_SECRET),
+            json={
+                "method": "eth_sendTransaction",
+                "caip2": caip2,
+                "params": {
+                    "transaction": _prepare_tx_for_privy(tx, _caip2_chain_id(caip2)),
+                },
+            },
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"privy send failed: {resp.status_code} {resp.text}")
+    body = resp.json()
+    data = body.get("data", {}) if isinstance(body, dict) else {}
+    tx_hash = (
+        data.get("hash")
+        or data.get("transaction_hash")
+        or data.get("transactionHash")
+    )
+    if not tx_hash:
+        raise RuntimeError(f"privy returned no tx hash: {body!r}")
+    return str(tx_hash)
+
+
 def make_privy_sign_typed_data_callback(
     wallet_id: str,
 ) -> Callable[[str | dict], Awaitable[str]]:
@@ -925,6 +959,68 @@ async def run_rotator(
     if not ok:
         out["error"] = f"deposit {result.get('status')}: {result.get('reason')}"
     return out
+
+
+async def run_rotator_withdraw(
+    *,
+    wallet_id: str,
+    wallet_address: str,
+    recipient: str,
+    caip2: str,
+) -> dict[str, Any]:
+    """Liquidate the rotator's Base positions back to USDC, then sweep all idle
+    USDC in the server wallet to `recipient` (the user's connected wallet)."""
+    if caip2 != DEFAULT_CAIP2:
+        raise ValueError(f"withdraw supports {DEFAULT_CAIP2}, got {caip2}")
+    _configure_wayfinder_sdk()
+    module = _rotator_main()
+    config = {
+        **ROTATOR_CONFIG_BASE,
+        "wallet": _rotator_label(wallet_id, wallet_address),
+    }
+
+    # 1. Redeem any deployed positions back to USDC in the server wallet.
+    withdraw_result = await module.action_withdraw(config, human_amount=None)
+    status = withdraw_result.get("status")
+    if status not in ("ok", "no-op"):
+        return {
+            "success": False,
+            "error": f"withdraw {status}: {withdraw_result.get('reason')}",
+            "status": {"withdraw": _jsonable(withdraw_result)},
+            "txHashes": [],
+        }
+
+    # 2. Sweep the idle Base USDC (redeemed + any leftover) to the user.
+    from wayfinder_paths.core.utils.tokens import get_token_balance
+
+    usdc_units = int(
+        await get_token_balance(
+            token_address=USDC_BASE,
+            chain_id=BASE_CHAIN_ID,
+            wallet_address=wallet_address,
+        )
+    )
+    sweep_tx: str | None = None
+    if usdc_units > 0:
+        sweep_tx = await privy_send_transaction(
+            wallet_id,
+            caip2,
+            {
+                "to": USDC_BASE,
+                "data": _erc20_transfer(recipient, usdc_units),
+                "value": "0x0",
+            },
+        )
+
+    return {
+        "success": True,
+        "status": {
+            "withdraw": _jsonable(withdraw_result),
+            "sweptUsdcUnits": usdc_units,
+            "recipient": recipient,
+        },
+        "txHashes": [sweep_tx] if sweep_tx else [],
+    }
 
 
 # ─── Funding conversion ──────────────────────────────────────────────────
