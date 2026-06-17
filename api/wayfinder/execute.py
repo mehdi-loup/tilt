@@ -219,12 +219,16 @@ BASE_CHAIN_ID = 8453  # funding target (target_caip2 is always eip155:8453)
 NATIVE_GAS_RESERVE_USD: dict[int, float] = {1: 20.0}
 DEFAULT_NATIVE_RESERVE_USD = 1.50
 
-# Base ETH the funding wallet must keep — and never swap. This is a *raw* wei
-# amount, not USD: the first plan step sends a fixed 0.001 ETH gas float to the
-# server wallet (mirror GAS_FUNDING_WEI in lib/strategy-plan.ts), plus padding
-# for the wallet's own Base funding-tx gas. StablecoinYieldStrategy requires
-# at least 0.001 ETH available before deposit/update.
-GAS_FLOAT_WEI = 1_000_000_000_000_000        # 0.001 ETH
+# Base ETH the funding wallet must keep — and never swap. Raw wei, not USD.
+# When the execution wallet's gas is below GAS_FLOAT_TRIGGER_WEI, the first plan
+# step tops it up with a fixed GAS_FLOAT_WEI float (mirror GAS_FUNDING_WEI in
+# lib/strategy-plan.ts); the funding wallet also needs padding for its own Base
+# funding-tx gas. The trigger is the strategies' operational gas floor (the
+# rotator rejects below ~0.0005 ETH), NOT the 0.001 ETH gas *maximum* — an
+# execution wallet already above the floor pays its own Base gas and needs no
+# float (the strategy invests USDC; ETH is only gas).
+GAS_FLOAT_WEI = 1_000_000_000_000_000        # 0.001 ETH — top-up target (gas maximum)
+GAS_FLOAT_TRIGGER_WEI = 500_000_000_000_000  # 0.0005 ETH — below this, top up (rotator min)
 BASE_GAS_PADDING_WEI = 300_000_000_000_000   # ~0.0003 ETH for the wallet's own txs
 BASE_GAS_RESERVE_WEI = GAS_FLOAT_WEI + BASE_GAS_PADDING_WEI
 
@@ -1120,16 +1124,20 @@ def _native_usd_by_chain(balances: list[dict[str, Any]]) -> dict[int, float]:
     return out
 
 
-def _base_gas_ok(balances: list[dict[str, Any]]) -> bool:
-    """Does the funding wallet hold enough raw Base ETH for the gas float plus
-    its own Base funding-tx gas? Gates the whole plan — without it the first
-    step (and every Base leg) can't pay gas."""
+def _base_gas_ok(balances: list[dict[str, Any]], server_gas_wei: int) -> bool:
+    """Does the funding wallet hold enough raw Base ETH for its own Base
+    funding-tx gas, plus the execution-wallet gas float only when one is
+    actually needed? The float is sent solely when the execution wallet is
+    below the operational floor (GAS_FLOAT_TRIGGER_WEI); above it the execution
+    wallet pays its own gas, so the funding wallet only has to cover padding."""
     base_native_wei = sum(
         int(b.get("amount") or 0)
         for b in balances
         if int(b.get("chain_id") or 0) == BASE_CHAIN_ID and _is_native(b)
     )
-    return base_native_wei >= BASE_GAS_RESERVE_WEI
+    float_needed = server_gas_wei < GAS_FLOAT_TRIGGER_WEI
+    required = (GAS_FLOAT_WEI if float_needed else 0) + BASE_GAS_PADDING_WEI
+    return base_native_wei >= required
 
 
 def _usable_chain(
@@ -1152,13 +1160,16 @@ async def balance_fund(
     target_usdc_units: int,
     amount_usd: float | None,
     target_caip2: str,
+    server_gas_wei: int = 0,
 ) -> dict[str, Any]:
     """Total investable USD across all funding-eligible chains — the base for
     the UI's 25/50/75/100% presets. Counts only holdings on monitorable chains
     where the wallet has native gas to transact, net of a per-chain gas
-    reserve, so a 100% preset stays executable."""
+    reserve, so a 100% preset stays executable. `server_gas_wei` is the
+    execution wallet's Base ETH; when it already clears the gas floor no float
+    is owed, so the funding wallet's Base-gas requirement drops to padding."""
     balances = await _enriched_balances(from_address)
-    base_gas_ok = _base_gas_ok(balances)
+    base_gas_ok = _base_gas_ok(balances, server_gas_wei)
     native_by_chain = _native_usd_by_chain(balances)
     gross = sum(float(b.get("value_usd") or 0) for b in balances if _bridgeable(b))
     total = sum(

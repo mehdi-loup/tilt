@@ -645,12 +645,12 @@ function PlanIntake({
   const overBalance = investableUsd !== null && amount > investableUsd;
   const disabled = building || amount < minAmount || overBalance;
   const balanceLabel = balanceLoading
-    ? "BALANCE …"
+    ? "INVESTABLE …"
     : balanceErr
-      ? "BALANCE UNAVAILABLE"
+      ? "INVESTABLE UNAVAILABLE"
       : investableUsd === null
-        ? "BALANCE --"
-        : `BALANCE $${investableUsd.toFixed(2)}`;
+        ? "INVESTABLE --"
+        : `INVESTABLE $${investableUsd.toFixed(2)}`;
   return (
     <div style={{ marginTop: 24 }}>
       <div
