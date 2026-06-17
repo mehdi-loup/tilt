@@ -91,6 +91,7 @@ async def fund_plan(body: dict[str, Any], _jwt: str = Depends(_auth)):
             target_usdc_units=int(target_units),
             amount_usd=float(body["amountUsd"]) if body.get("amountUsd") is not None else None,
             target_caip2=body.get("caip2", execute.DEFAULT_CAIP2),
+            server_gas_wei=int(body.get("serverGasWei") or 0),
         )
     except Exception as exc:  # noqa: BLE001 — surfaced to the caller
         return _engine_error(exc)

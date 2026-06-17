@@ -1197,6 +1197,7 @@ async def plan_fund(
     target_usdc_units: int,
     amount_usd: float | None,
     target_caip2: str,
+    server_gas_wei: int = 0,
 ) -> dict[str, Any]:
     """Build the unsigned txs that turn the funding wallet's holdings into
     `target_usdc_units` of USDC on Base and deliver them to the server wallet.
@@ -1212,7 +1213,7 @@ async def plan_fund(
     target_chain = _caip2_chain_id(target_caip2)
     balances = await _enriched_balances(from_address)
     native_by_chain = _native_usd_by_chain(balances)
-    base_gas_ok = _base_gas_ok(balances)
+    base_gas_ok = _base_gas_ok(balances, server_gas_wei)
 
     # The first plan step sends a fixed-size ETH gas float on Base and every
     # funding leg costs Base gas, so without enough raw Base ETH nothing is
