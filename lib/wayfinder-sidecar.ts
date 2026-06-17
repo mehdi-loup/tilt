@@ -19,8 +19,12 @@ export interface WayfinderResult {
   jobId?: string;
   // fund/plan: Wayfinder-built funding transactions for the connected wallet
   txs?: { to: string; data: string; value: string; chainId: number; label?: string }[];
-  // fund/balance: total investable USD value Wayfinder sees in the wallet
+  // fund/balance: total investable USD value Wayfinder sees in the wallet,
+  // plus the gross USD before gas/eligibility gating and whether the wallet
+  // holds enough Base ETH for the gas float — used to explain a $0 balance.
   investableUsd?: number;
+  grossUsd?: number;
+  baseGasOk?: boolean;
 }
 
 /** Shared Next.js → sidecar secret. One secret, one purpose — no fallback. */

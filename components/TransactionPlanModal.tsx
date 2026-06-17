@@ -50,6 +50,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
   const [amount, setAmount] = useState(0);
   const [investableUsd, setInvestableUsd] = useState<number | null>(null);
   const [balanceErr, setBalanceErr] = useState<string | null>(null);
+  const [balanceHint, setBalanceHint] = useState<string | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [executionId, setExecutionId] = useState<string | null>(null);
@@ -74,6 +75,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
     if (!fundingWallet || !authenticated) {
       setInvestableUsd(null);
       setBalanceErr(null);
+      setBalanceHint(null);
       setBalanceLoading(false);
       return;
     }
@@ -81,6 +83,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
     (async () => {
       setBalanceLoading(true);
       setBalanceErr(null);
+      setBalanceHint(null);
       try {
         const jwt = await getAccessToken();
         const res = await fetch("/api/plan/balance", {
@@ -91,12 +94,21 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
         const body = (await res.json().catch(() => ({}))) as {
           investableUsd?: number | null;
           error?: string;
+          needsBaseGas?: boolean;
+          grossUsd?: number;
         };
         if (!res.ok) throw new Error(body.error ?? `balance HTTP ${res.status}`);
         if (typeof body.investableUsd !== "number") {
           throw new Error("Wayfinder balance unavailable");
         }
-        if (!cancelled) setInvestableUsd(body.investableUsd);
+        if (!cancelled) {
+          setInvestableUsd(body.investableUsd);
+          setBalanceHint(
+            body.needsBaseGas
+              ? `You hold $${(body.grossUsd ?? 0).toFixed(2)}, but your funding wallet needs a little ETH on Base for gas before it can invest.`
+              : null,
+          );
+        }
       } catch (err) {
         if (!cancelled) {
           setInvestableUsd(null);
@@ -424,6 +436,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
             minAmount={MIN_EXECUTE_USD}
             investableUsd={investableUsd}
             balanceErr={balanceErr}
+            balanceHint={balanceHint}
             balanceLoading={balanceLoading}
           />
         )}
@@ -615,6 +628,7 @@ function PlanIntake({
   minAmount,
   investableUsd,
   balanceErr,
+  balanceHint,
   balanceLoading,
 }: {
   amount: number;
@@ -625,6 +639,7 @@ function PlanIntake({
   minAmount: number;
   investableUsd: number | null;
   balanceErr: string | null;
+  balanceHint: string | null;
   balanceLoading: boolean;
 }) {
   const overBalance = investableUsd !== null && amount > investableUsd;
@@ -725,6 +740,11 @@ function PlanIntake({
       {overBalance && (
         <div style={{ color: C.warn, fontFamily: C.mono, fontSize: 11, marginBottom: 12 }}>
           Amount exceeds your investable balance.
+        </div>
+      )}
+      {balanceHint && (
+        <div style={{ color: C.warn, fontFamily: C.mono, fontSize: 11, marginBottom: 12 }}>
+          {balanceHint}
         </div>
       )}
       {balanceErr && (
