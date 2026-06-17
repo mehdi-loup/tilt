@@ -116,12 +116,21 @@ async def fund_balance(body: dict[str, Any], _jwt: str = Depends(_auth)):
 
 
 @app.post("/wallet/withdraw")
-async def wallet_withdraw(body: dict[str, Any], _jwt: str = Depends(_auth)):
-    wallet_id = body.get("walletId")
-    wallet_address = body.get("walletAddress")
+async def wallet_withdraw(body: dict[str, Any], jwt: str = Depends(_auth)):
     recipient = body.get("recipient")
-    if not (wallet_id and wallet_address and recipient):
-        raise HTTPException(400, "walletId, walletAddress, recipient required")
+    if not recipient:
+        raise HTTPException(400, "recipient required")
+    # Withdraw exfiltrates funds, so bind the wallet to the *verified* user — the
+    # request body's walletId is never trusted. Verify the Privy JWT and look up
+    # the canonical wallet from the registry; fail closed on any gap.
+    try:
+        user_id = execute.verify_privy_user_id(jwt)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(401, f"invalid user token: {exc}")
+    wallet = await ledger.server_wallet_for_user(user_id)
+    if wallet is None:
+        raise HTTPException(404, "no execution wallet for this user")
+    wallet_id, wallet_address = wallet
     try:
         result = await execute.run_rotator_withdraw(
             wallet_id=wallet_id,

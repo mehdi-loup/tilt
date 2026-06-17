@@ -33,6 +33,10 @@ PRIVY_APP_ID = os.environ.get("PRIVY_APP_ID") or os.environ.get(
 PRIVY_APP_SECRET = os.environ.get("PRIVY_APP_SECRET", "")
 # One secret, one purpose — no PRIVY_APP_SECRET fallback.
 INTERNAL_SECRET = os.environ.get("WAYFINDER_INTERNAL_SECRET", "")
+# ES256 public key (PEM) from the Privy dashboard → JWT settings. Used to verify
+# the user access token for fund-moving endpoints (withdraw), so the wallet is
+# bound to the authenticated user rather than a body-supplied id.
+PRIVY_VERIFICATION_KEY = os.environ.get("PRIVY_VERIFICATION_KEY", "").replace("\\n", "\n")
 
 DEFAULT_CAIP2 = "eip155:8453"  # Base mainnet
 SDK_LEGACY_API_BASE_URL = "https://wayfinder.ai/api"
@@ -361,6 +365,27 @@ async def privy_send_transaction(wallet_id: str, caip2: str, tx: dict[str, Any])
     if not tx_hash:
         raise RuntimeError(f"privy returned no tx hash: {body!r}")
     return str(tx_hash)
+
+
+def verify_privy_user_id(jwt_token: str) -> str:
+    """Verify a Privy access token (ES256) against the app's verification key
+    and return the authenticated user id (the `sub` DID). Raises on any failure
+    — fund-moving endpoints must fail closed, never trust an unverified identity."""
+    if not PRIVY_VERIFICATION_KEY:
+        raise RuntimeError("PRIVY_VERIFICATION_KEY is not configured")
+    import jwt as pyjwt  # PyJWT
+
+    claims = pyjwt.decode(
+        jwt_token,
+        PRIVY_VERIFICATION_KEY,
+        algorithms=["ES256"],
+        audience=PRIVY_APP_ID,
+        issuer="privy.io",
+    )
+    sub = claims.get("sub")
+    if not sub:
+        raise RuntimeError("Privy token missing sub claim")
+    return str(sub)
 
 
 def make_privy_sign_typed_data_callback(

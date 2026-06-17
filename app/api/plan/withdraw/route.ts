@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { authenticate } from "@/lib/privy-server";
-import { lookupServerWallet } from "@/lib/wallet-registry";
 import { FUNDING_CAIP2 } from "@/lib/chains";
 import { callWayfinder } from "@/lib/wayfinder-sidecar";
 
@@ -15,7 +14,9 @@ export const maxDuration = 300;
  * connected wallet). Auth: `Authorization: Bearer <privy-access-token>`.
  *
  * Liquidates the user's rotator positions back to USDC in their execution
- * wallet and sweeps all idle Base USDC to `recipient`.
+ * wallet and sweeps all idle Base USDC to `recipient`. The sidecar re-verifies
+ * the user JWT and derives the execution wallet from it — the client cannot
+ * specify which wallet to drain.
  */
 export async function POST(req: Request) {
   const user = await authenticate(req);
@@ -29,15 +30,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "valid recipient address required" }, { status: 400 });
   }
 
-  const wallet = await lookupServerWallet(user.userId);
-  if (!wallet) {
-    return NextResponse.json({ error: "no execution wallet to withdraw from" }, { status: 404 });
-  }
-
   const origin = new URL(req.url).origin;
   const { ok, status, payload } = await callWayfinder(origin, user.jwt, "/wallet/withdraw", {
-    walletId: wallet.walletId,
-    walletAddress: wallet.address,
     recipient,
     caip2: FUNDING_CAIP2,
   });
