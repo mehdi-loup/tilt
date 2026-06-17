@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { usePrivy, useWallets, type User } from "@privy-io/react-auth";
+import { usePrivy, useUser, useWallets, type User } from "@privy-io/react-auth";
 
 const C = {
   ink: "#f0efe9",
@@ -20,7 +20,7 @@ function truncate(address: string) {
 
 // When the user authenticated without an external wallet (email, social,
 // phone), surface that identity rather than the managed Privy embedded wallet.
-function authLabel(user: User | null): string {
+function authLabel(user: User | null): string | null {
   if (user?.email?.address) return user.email.address;
   if (user?.google?.email) return user.google.email;
   if (user?.phone?.number) return user.phone.number;
@@ -30,11 +30,12 @@ function authLabel(user: User | null): string {
   if (user?.apple?.email) return user.apple.email;
   if (user?.farcaster?.username) return user.farcaster.username;
   if (user?.telegram?.username) return user.telegram.username;
-  return "ACCOUNT";
+  return null;
 }
 
 export function WalletChip() {
   const { ready, authenticated, user, getAccessToken, login, logout } = usePrivy();
+  const { refreshUser } = useUser();
   const { wallets } = useWallets();
   const [open, setOpen] = useState(false);
   const [withdrawing, setWithdrawing] = useState(false);
@@ -102,7 +103,9 @@ export function WalletChip() {
     );
   }
 
-  if (!authenticated) {
+  // No external wallet and no recognized auth identity → nothing to show;
+  // fall back to the connect action rather than a placeholder label.
+  if (!authenticated || !label) {
     return (
       <button
         onClick={login}
@@ -129,7 +132,14 @@ export function WalletChip() {
   return (
     <div ref={ref} style={{ position: "relative" }}>
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          // Refresh the session on open so a freshly provisioned execution
+          // wallet (mirrored into Privy custom metadata server-side) surfaces
+          // without a reload, even if the build that wrote it errored after.
+          if (next) void refreshUser().catch(() => {});
+        }}
         style={{
           display: "flex",
           alignItems: "center",

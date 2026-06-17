@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useCreateWallet, usePrivy, useSendTransaction, useWallets } from "@privy-io/react-auth";
+import { useCreateWallet, usePrivy, useSendTransaction, useUser, useWallets } from "@privy-io/react-auth";
 import type { Plan, PlanStep } from "@/lib/strategy-plan";
 import { RPC_URLS, TOKENS, FUNDING_CHAIN_ID, explorerTxUrl } from "@/lib/chains";
 
@@ -40,6 +40,7 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
   const { wallets } = useWallets();
   const { createWallet } = useCreateWallet();
   const { sendTransaction } = useSendTransaction();
+  const { refreshUser } = useUser();
 
   // Funding source = the wallet the user connected. Prefer an external wallet
   // (where they actually hold funds); fall back to the Privy embedded wallet.
@@ -142,12 +143,20 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
       const init: Record<string, StepState> = {};
       for (const s of body.plan.steps) init[s.id] = { status: "idle" };
       setSteps(init);
+      // Build provisioned the execution wallet and mirrored its address into
+      // Privy custom metadata server-side; refresh the session so the chip's
+      // withdraw option appears in-session without a reload.
+      try {
+        await refreshUser();
+      } catch {
+        // Best-effort: the chip picks up the address on the next reload.
+      }
     } catch (err) {
       setPlanErr(err instanceof Error ? err.message : "build failed");
     } finally {
       setBuilding(false);
     }
-  }, [amount, authenticated, fundingWallet, getAccessToken, risk]);
+  }, [amount, authenticated, fundingWallet, getAccessToken, refreshUser, risk]);
 
   const createEmbeddedWallet = useCallback(async () => {
     if (!authenticated) {
