@@ -514,7 +514,22 @@ export function TransactionPlanModal({ risk, onClose }: Props) {
                     textAlign: "center",
                   }}
                 >
-                  PLAN COMPLETE · {Math.round(plan.liveFraction * 100)}% LIVE · {Math.round((1 - plan.liveFraction) * 100)}% STUBBED
+                  <div>PLAN COMPLETE · {Math.round(plan.liveFraction * 100)}% LIVE</div>
+                  <a
+                    href={`https://zapper.xyz/account/${plan.serverWalletAddress}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: "inline-block",
+                      marginTop: 8,
+                      color: C.accent,
+                      fontSize: 11,
+                      letterSpacing: 1,
+                      textDecoration: "underline",
+                    }}
+                  >
+                    VIEW EXECUTION WALLET IN ZAPPER ↗
+                  </a>
                 </div>
               )}
               <div

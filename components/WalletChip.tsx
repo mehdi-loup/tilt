@@ -185,97 +185,32 @@ export function WalletChip() {
         >
           {address && (
             <>
-              <MenuItem
-                onClick={() => {
-                  navigator.clipboard.writeText(address);
-                  setOpen(false);
-                }}
-              >
-                COPY ADDRESS
-              </MenuItem>
-              <a
-                href={`https://zapper.xyz/account/${address}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={() => setOpen(false)}
-                style={{
-                  display: "block",
-                  padding: "10px 14px",
-                  fontFamily: C.mono,
-                  fontSize: 11,
-                  color: C.sub,
-                  letterSpacing: 1.2,
-                  textDecoration: "none",
-                  borderTop: `1px solid ${C.dim}`,
-                }}
-              >
-                VIEW IN ZAPPER ↗
-              </a>
+              <WalletSection label="CONNECTED WALLET" address={address} close={() => setOpen(false)} />
               <div style={{ borderTop: `1px solid ${C.dim}` }} />
             </>
           )}
           {serverAddr && (
             <>
-              <div style={{ padding: "10px 14px" }}>
-                <div
-                  style={{
-                    fontFamily: C.mono,
-                    fontSize: 9,
-                    letterSpacing: 1.5,
-                    color: C.sub,
-                    marginBottom: 5,
-                  }}
-                >
-                  EXECUTION WALLET
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span
-                    title={serverAddr}
-                    onClick={() => navigator.clipboard.writeText(serverAddr)}
+              <WalletSection label="EXECUTION WALLET" address={serverAddr} close={() => setOpen(false)}>
+                {address && (
+                  <MenuItem onClick={withdraw}>
+                    {withdrawing ? "WITHDRAWING…" : `WITHDRAW → ${truncate(address)}`}
+                  </MenuItem>
+                )}
+                {withdrawMsg && (
+                  <div
                     style={{
+                      padding: "0 14px 10px",
                       fontFamily: C.mono,
-                      fontSize: 11,
-                      color: C.ink,
-                      letterSpacing: 0.6,
-                      cursor: "pointer",
-                    }}
-                  >
-                    {truncate(serverAddr)}
-                  </span>
-                  <a
-                    href={`https://zapper.xyz/account/${serverAddr}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    onClick={() => setOpen(false)}
-                    style={{
-                      fontFamily: C.mono,
-                      fontSize: 11,
+                      fontSize: 10,
                       color: C.sub,
-                      textDecoration: "none",
+                      letterSpacing: 1,
                     }}
                   >
-                    ↗
-                  </a>
-                </div>
-              </div>
-              {address && (
-                <MenuItem onClick={withdraw}>
-                  {withdrawing ? "WITHDRAWING…" : `WITHDRAW → ${truncate(address)}`}
-                </MenuItem>
-              )}
-              {withdrawMsg && (
-                <div
-                  style={{
-                    padding: "0 14px 10px",
-                    fontFamily: C.mono,
-                    fontSize: 10,
-                    color: C.sub,
-                    letterSpacing: 1,
-                  }}
-                >
-                  {withdrawMsg}
-                </div>
-              )}
+                    {withdrawMsg}
+                  </div>
+                )}
+              </WalletSection>
               <div style={{ borderTop: `1px solid ${C.dim}` }} />
             </>
           )}
@@ -291,6 +226,70 @@ export function WalletChip() {
         </div>
       )}
     </div>
+  );
+}
+
+// A labelled wallet block: address + copy + Zapper link, plus any extra
+// actions (e.g. withdraw) passed as children.
+function WalletSection({
+  label,
+  address,
+  close,
+  children,
+}: {
+  label: string;
+  address: string;
+  close: () => void;
+  children?: React.ReactNode;
+}) {
+  return (
+    <>
+      <div style={{ padding: "10px 14px 4px" }}>
+        <div
+          style={{
+            fontFamily: C.mono,
+            fontSize: 9,
+            letterSpacing: 1.5,
+            color: C.sub,
+            marginBottom: 5,
+          }}
+        >
+          {label}
+        </div>
+        <span
+          title={address}
+          style={{ fontFamily: C.mono, fontSize: 11, color: C.ink, letterSpacing: 0.6 }}
+        >
+          {truncate(address)}
+        </span>
+      </div>
+      <MenuItem
+        onClick={() => {
+          navigator.clipboard.writeText(address);
+          close();
+        }}
+      >
+        COPY ADDRESS
+      </MenuItem>
+      <a
+        href={`https://zapper.xyz/account/${address}`}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={close}
+        style={{
+          display: "block",
+          padding: "10px 14px",
+          fontFamily: C.mono,
+          fontSize: 11,
+          color: C.sub,
+          letterSpacing: 1.2,
+          textDecoration: "none",
+        }}
+      >
+        VIEW IN ZAPPER ↗
+      </a>
+      {children}
+    </>
   );
 }
 
