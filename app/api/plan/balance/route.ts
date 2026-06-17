@@ -80,5 +80,13 @@ export async function POST(req: Request) {
   }
 
   const serverIdleUsd = await serverWalletIdleUsd(user.userId);
-  return NextResponse.json({ investableUsd: payload.investableUsd + serverIdleUsd });
+  const investableUsd = payload.investableUsd + serverIdleUsd;
+  // The wallet holds funds but not the Base ETH gas float every plan needs to
+  // begin, so nothing is investable. Surface that instead of a bare $0.
+  const needsBaseGas =
+    investableUsd === 0 && payload.baseGasOk === false && (payload.grossUsd ?? 0) > 0;
+  return NextResponse.json({
+    investableUsd,
+    ...(needsBaseGas ? { needsBaseGas: true, grossUsd: payload.grossUsd } : {}),
+  });
 }

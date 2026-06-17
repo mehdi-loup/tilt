@@ -1171,7 +1171,12 @@ async def balance_fund(
         f"base_gas_ok={base_gas_ok} gross_usd={gross:.2f} investable={total:.2f}",
         flush=True,
     )
-    return {"mode": "balance", "investableUsd": total}
+    return {
+        "mode": "balance",
+        "investableUsd": total,
+        "grossUsd": gross,
+        "baseGasOk": base_gas_ok,
+    }
 
 
 async def plan_fund(
