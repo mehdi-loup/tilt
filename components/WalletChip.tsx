@@ -43,6 +43,7 @@ export function WalletChip() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [withdrawing, setWithdrawing] = useState(false);
   const [withdrawMsg, setWithdrawMsg] = useState<string | null>(null);
+  const [withdrawTxs, setWithdrawTxs] = useState<string[]>([]);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -70,6 +71,7 @@ export function WalletChip() {
     if (!address || withdrawing) return;
     setWithdrawing(true);
     setWithdrawMsg(null);
+    setWithdrawTxs([]);
     try {
       const jwt = await getAccessToken();
       const res = await fetch("/api/plan/withdraw", {
@@ -83,6 +85,7 @@ export function WalletChip() {
         status?: { nativeSweepError?: string };
       };
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      setWithdrawTxs(body.txHashes ?? []);
       // The native (ETH gas) sweep is best-effort and runs after the USDC has
       // already moved, so surface a partial failure rather than a flat "✓".
       if (body.status?.nativeSweepError) {
@@ -207,6 +210,7 @@ export function WalletChip() {
                   <MenuItem
                     onClick={() => {
                       setWithdrawMsg(null);
+                      setWithdrawTxs([]);
                       setOpen(false);
                       setConfirmOpen(true);
                     }}
@@ -267,9 +271,41 @@ export function WalletChip() {
             </div>
             {withdrawMsg ? (
               <>
-                <div style={{ fontSize: 12, lineHeight: 1.6, color: C.ink, marginBottom: 22 }}>
+                <div
+                  style={{
+                    fontSize: 12,
+                    lineHeight: 1.6,
+                    color: C.ink,
+                    marginBottom: withdrawTxs.length > 0 ? 14 : 22,
+                  }}
+                >
                   {withdrawMsg}
                 </div>
+                {withdrawTxs.length > 0 && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 9, marginBottom: 22 }}>
+                    {withdrawTxs.map((h) => (
+                      <a
+                        key={h}
+                        href={`https://basescan.org/tx/${h}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={resultLink}
+                      >
+                        {`TRANSACTION ${truncate(h)} ↗`}
+                      </a>
+                    ))}
+                    {serverAddr && (
+                      <a
+                        href={`https://zapper.xyz/account/${serverAddr}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={resultLink}
+                      >
+                        EXECUTION WALLET IN ZAPPER ↗
+                      </a>
+                    )}
+                  </div>
+                )}
                 <div style={{ display: "flex", justifyContent: "flex-end" }}>
                   <button
                     onClick={() => {
@@ -310,6 +346,15 @@ export function WalletChip() {
     </div>
   );
 }
+
+// Result-modal links (withdrawal tx + execution-wallet explorer).
+const resultLink: React.CSSProperties = {
+  fontFamily: C.mono,
+  fontSize: 11,
+  color: C.accent,
+  letterSpacing: 1,
+  textDecoration: "none",
+};
 
 // Confirm-dialog button styles: `primary` is the accent-filled action.
 function confirmBtn(primary: boolean, busy = false): React.CSSProperties {
