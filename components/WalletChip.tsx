@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useConnectWallet, usePrivy, useUser, useWallets, type User } from "@privy-io/react-auth";
 
 const C = {
@@ -219,7 +220,11 @@ export function WalletChip() {
         </div>
       )}
 
-      {confirmOpen && (
+      {/* Portal to body: the nav header has `backdrop-filter`, which makes it
+          the containing block for `position: fixed` children — without the
+          portal the overlay would fill the 64px header, not the viewport. */}
+      {confirmOpen &&
+        createPortal(
         <div
           onClick={() => !withdrawing && setConfirmOpen(false)}
           style={{
@@ -289,7 +294,8 @@ export function WalletChip() {
               </>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );
