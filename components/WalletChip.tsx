@@ -77,9 +77,19 @@ export function WalletChip() {
         headers: { "content-type": "application/json", authorization: `Bearer ${jwt}` },
         body: JSON.stringify({ recipient: address }),
       });
-      const body = (await res.json().catch(() => ({}))) as { txHashes?: string[]; error?: string };
+      const body = (await res.json().catch(() => ({}))) as {
+        txHashes?: string[];
+        error?: string;
+        status?: { nativeSweepError?: string };
+      };
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      setWithdrawMsg((body.txHashes?.length ?? 0) > 0 ? "Withdrawn ✓" : "Nothing to withdraw");
+      // The native (ETH gas) sweep is best-effort and runs after the USDC has
+      // already moved, so surface a partial failure rather than a flat "✓".
+      if (body.status?.nativeSweepError) {
+        setWithdrawMsg("Withdrew your USDC, but couldn't sweep the remaining ETH gas — run Withdraw again to retry it.");
+      } else {
+        setWithdrawMsg((body.txHashes?.length ?? 0) > 0 ? "Withdrawn ✓" : "Nothing to withdraw");
+      }
     } catch (e) {
       setWithdrawMsg(e instanceof Error ? e.message : "withdraw failed");
     } finally {

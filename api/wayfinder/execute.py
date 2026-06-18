@@ -1020,9 +1020,18 @@ async def _sweep_native(
     from wayfinder_paths.core.utils.web3 import web3_from_chain_id
 
     async with web3_from_chain_id(BASE_CHAIN_ID) as w3:
+        addr = w3.to_checksum_address(wallet_address)
+        # Pin the balance read to the USDC sweep's confirmed block. Waiting for
+        # the receipt isn't enough: a load-balanced RPC can serve a "latest"
+        # that lags the receipt by a block, over-reporting the balance (the
+        # sweep's gas not yet deducted) so `value` overdraws and the send is
+        # rejected for insufficient funds. Reading *at* the receipt block
+        # includes that gas deterministically.
+        block_id: Any = "latest"
         if after_tx:
-            await w3.eth.wait_for_transaction_receipt(after_tx, timeout=120)
-        balance = int(await w3.eth.get_balance(w3.to_checksum_address(wallet_address)))
+            receipt = await w3.eth.wait_for_transaction_receipt(after_tx, timeout=120)
+            block_id = receipt["blockNumber"]
+        balance = int(await w3.eth.get_balance(addr, block_identifier=block_id))
         base_fee = int((await w3.eth.get_block("latest"))["baseFeePerGas"])
         try:
             priority = int(await w3.eth.max_priority_fee)
@@ -1030,9 +1039,12 @@ async def _sweep_native(
             priority = 1_000_000  # 0.001 gwei fallback if eth_maxPriorityFeePerGas is unsupported
 
     gas_limit = 21_000  # plain ETH transfer
-    # Reserve the 1559 fee cap (2*base + priority); the refund leaves only the
-    # ~21000*base_fee the transfer itself burns, so the wallet ends ~empty.
-    max_fee = base_fee * 2 + priority
+    # Privy exposes no gas quote and no send-max, so we set the EIP-1559 cap
+    # ourselves and pass all fee fields (Privy then honors them rather than
+    # re-estimating). The cap is generous so a base-fee rise between read and
+    # broadcast can't push value+fee over the balance; unused gas is refunded,
+    # so over-reserving only leaves a little (recoverable) dust.
+    max_fee = base_fee * 4 + priority
     value = balance - gas_limit * max_fee
     if value <= 0:
         return None, 0
