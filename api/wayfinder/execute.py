@@ -33,10 +33,11 @@ PRIVY_APP_ID = os.environ.get("PRIVY_APP_ID") or os.environ.get(
 PRIVY_APP_SECRET = os.environ.get("PRIVY_APP_SECRET", "")
 # One secret, one purpose — no PRIVY_APP_SECRET fallback.
 INTERNAL_SECRET = os.environ.get("WAYFINDER_INTERNAL_SECRET", "")
-# ES256 public key (PEM) from the Privy dashboard → JWT settings. Used to verify
-# the user access token for fund-moving endpoints (withdraw), so the wallet is
-# bound to the authenticated user rather than a body-supplied id.
-PRIVY_VERIFICATION_KEY = os.environ.get("PRIVY_VERIFICATION_KEY", "").replace("\\n", "\n")
+# Privy publishes its ES256 token-signing keys (JWKS) on the auth host — a
+# different host from the wallet-RPC API base above. Fund-moving endpoints
+# (withdraw) verify the user access token against this, picking the key by the
+# token's `kid` so Privy key rotation needs no redeploy or env change.
+PRIVY_AUTH_BASE = os.environ.get("PRIVY_AUTH_URL", "https://auth.privy.io")
 
 DEFAULT_CAIP2 = "eip155:8453"  # Base mainnet
 SDK_LEGACY_API_BASE_URL = "https://wayfinder.ai/api"
@@ -371,17 +372,31 @@ async def privy_send_transaction(wallet_id: str, caip2: str, tx: dict[str, Any])
     return str(tx_hash)
 
 
+_privy_jwks_client: Any = None
+
+
+def _privy_jwks() -> Any:
+    """Cached PyJWKClient over Privy's published JWKS, so a token is verified
+    against the exact key that signed it (resolved by `kid`)."""
+    global _privy_jwks_client
+    if _privy_jwks_client is None:
+        import jwt as pyjwt  # PyJWT
+        _privy_jwks_client = pyjwt.PyJWKClient(
+            f"{PRIVY_AUTH_BASE}/api/v1/apps/{PRIVY_APP_ID}/jwks.json"
+        )
+    return _privy_jwks_client
+
+
 def verify_privy_user_id(jwt_token: str) -> str:
-    """Verify a Privy access token (ES256) against the app's verification key
-    and return the authenticated user id (the `sub` DID). Raises on any failure
+    """Verify a Privy access token (ES256) against the app's published JWKS and
+    return the authenticated user id (the `sub` DID). Raises on any failure
     — fund-moving endpoints must fail closed, never trust an unverified identity."""
-    if not PRIVY_VERIFICATION_KEY:
-        raise RuntimeError("PRIVY_VERIFICATION_KEY is not configured")
     import jwt as pyjwt  # PyJWT
 
+    signing_key = _privy_jwks().get_signing_key_from_jwt(jwt_token)
     claims = pyjwt.decode(
         jwt_token,
-        PRIVY_VERIFICATION_KEY,
+        signing_key.key,
         algorithms=["ES256"],
         audience=PRIVY_APP_ID,
         issuer="privy.io",
