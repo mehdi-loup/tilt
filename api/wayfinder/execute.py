@@ -1039,25 +1039,22 @@ async def _sweep_native(
             priority = 1_000_000  # 0.001 gwei fallback if eth_maxPriorityFeePerGas is unsupported
 
     gas_limit = 21_000  # plain ETH transfer
-    # Privy exposes no gas quote and no send-max, so we set the EIP-1559 cap
-    # ourselves and pass all fee fields (Privy then honors them rather than
-    # re-estimating). The cap is generous so a base-fee rise between read and
-    # broadcast can't push value+fee over the balance; unused gas is refunded,
-    # so over-reserving only leaves a little (recoverable) dust.
-    max_fee = base_fee * 4 + priority
-    value = balance - gas_limit * max_fee
+    # Let Privy price the fee — like the USDC sweep above, we send only to+value
+    # and Privy estimates gas at broadcast. Privy exposes no gas quote and no
+    # send-max, and prices its own ~(2*base + priority) off the live base-fee
+    # (ignoring any cap we pass), so passing a cap doesn't help — what matters is
+    # that `value` leaves enough headroom for Privy's fee. The Base base-fee can
+    # jump several-fold in the seconds before broadcast (it ~doubled in observed
+    # failures), so reserve well above Privy's estimate; the unused reserve just
+    # stays as (recoverable) dust.
+    reserve = gas_limit * (base_fee * 10 + priority)
+    value = balance - reserve
     if value <= 0:
         return None, 0
     tx_hash = await privy_send_transaction(
         wallet_id,
         caip2,
-        {
-            "to": recipient,
-            "value": hex(value),
-            "gas": gas_limit,
-            "maxFeePerGas": max_fee,
-            "maxPriorityFeePerGas": priority,
-        },
+        {"to": recipient, "value": hex(value)},
     )
     return tx_hash, value
 
